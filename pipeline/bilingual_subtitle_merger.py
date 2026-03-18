@@ -74,13 +74,29 @@ def merge_bilingual_subtitles(
     secondary_speech = [(s, e) for s, e in secondary_speech_raw if e - s >= 0.5]
     _log(f"  {secondary_language_tag}: {len(secondary_speech_raw)} raw → {len(secondary_speech)} speech regions (≥0.5s)")
 
-    # Step 2: Resolve fine-grained overlaps
+    # Step 2: Smart merge — if a silence gap in one track also has silence
+    # in the other track, it's just a pause (same speaker continues).
+    # Only keep silence boundaries where the OTHER track has speech.
+    _log("Smart-merging speech regions (pause vs speaker switch)...")
+    primary_speech_before = len(primary_speech)
+    secondary_speech_before = len(secondary_speech)
+
+    primary_speech = _merge_pauses_where_other_track_is_silent(
+        primary_speech, secondary_speech,
+    )
+    secondary_speech = _merge_pauses_where_other_track_is_silent(
+        secondary_speech, primary_speech,
+    )
+    _log(f"  {primary_language_tag}: {primary_speech_before} → {len(primary_speech)} regions")
+    _log(f"  {secondary_language_tag}: {secondary_speech_before} → {len(secondary_speech)} regions")
+
+    # Step 3: Resolve fine-grained overlaps
     overlaps_before = _find_overlaps(primary_speech, secondary_speech)
     if overlaps_before:
         _log(f"Found {len(overlaps_before)} overlaps ({sum(d for _,_,d in overlaps_before):.2f}s) — resolving...")
         primary_speech, secondary_speech = _split_overlaps_in_middle(primary_speech, secondary_speech)
 
-    # Step 3: Split content at silence boundaries (perfect alignment)
+    # Step 4: Split content at silence boundaries (perfect alignment)
     _log(f"Splitting {primary_language_tag} entries at silence boundaries...")
     primary_entries = _split_content_at_silence_boundaries(
         primary_content, primary_speech, primary_language_tag,
@@ -596,6 +612,52 @@ def _refine_turn_boundaries_and_close_gaps(
             refined[i + 1]["start_seconds"] = midpoint
 
     return refined
+
+
+def _merge_pauses_where_other_track_is_silent(
+    speech_regions: list[tuple[float, float]],
+    other_track_speech: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """
+    Merge consecutive speech regions when the gap between them has NO speech
+    in the other track. This means the speaker just paused (same train of
+    thought), not a real speaker switch.
+
+    If the gap DOES have other-track speech, keep the boundary (real switch).
+    """
+    if len(speech_regions) <= 1:
+        return list(speech_regions)
+
+    sorted_regions = sorted(speech_regions, key=lambda r: r[0])
+    merged = [sorted_regions[0]]
+
+    for region_start, region_end in sorted_regions[1:]:
+        previous_start, previous_end = merged[-1]
+        gap_start = previous_end
+        gap_end = region_start
+
+        if gap_end <= gap_start:
+            # Overlapping or adjacent — merge
+            merged[-1] = (previous_start, max(previous_end, region_end))
+            continue
+
+        # Check if the other track has speech during this gap
+        other_has_speech_in_gap = False
+        for other_start, other_end in other_track_speech:
+            overlap_start = max(gap_start, other_start)
+            overlap_end = min(gap_end, other_end)
+            if overlap_end - overlap_start > 0.3:  # at least 300ms of other speech
+                other_has_speech_in_gap = True
+                break
+
+        if other_has_speech_in_gap:
+            # Real speaker switch — keep the boundary
+            merged.append((region_start, region_end))
+        else:
+            # Just a pause — merge across the gap
+            merged[-1] = (previous_start, region_end)
+
+    return merged
 
 
 def _merge_consecutive_same_language(entries: list[dict]) -> list[dict]:

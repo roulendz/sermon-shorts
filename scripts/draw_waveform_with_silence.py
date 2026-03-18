@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
-from pipeline.silence_detection import detect_silence_regions
+from pipeline.silence_detection import detect_silence_regions, silence_regions_to_speech_regions
 
 BASE_DIR = Path(r"I:\2026-01-04 Pacelot mīlestības karogu\Audio RAW")
 RU_AUDIO = BASE_DIR / "2026-01-04 Pacelot mīlestības karogu_A04.wav"
@@ -30,7 +30,7 @@ OUTPUT_PNG = Path(r"I:\2026-01-04 Pacelot mīlestības karogu\diagnostics\wavefo
 WINDOW_SECONDS = 300
 TARGET_SAMPLE_RATE = 8000
 NOISE_DB = -45
-MIN_SILENCE = 1.5
+MIN_SILENCE = 1.0
 
 
 def load_audio_as_mono(audio_path, duration_seconds):
@@ -84,12 +84,52 @@ def main():
     print("Detecting RU silences...")
     ru_silences = detect_silence_regions(str(RU_AUDIO), NOISE_DB, MIN_SILENCE)
     ru_silences_window = [(s, min(e, WINDOW_SECONDS)) for s, e in ru_silences if s < WINDOW_SECONDS]
-    print(f"  {len(ru_silences_window)} RU silence regions in window")
+    print(f"  {len(ru_silences_window)} RU silence regions (raw)")
 
     print("Detecting LV silences...")
     lv_silences = detect_silence_regions(str(LV_AUDIO), NOISE_DB, MIN_SILENCE)
     lv_silences_window = [(s, min(e, WINDOW_SECONDS)) for s, e in lv_silences if s < WINDOW_SECONDS]
-    print(f"  {len(lv_silences_window)} LV silence regions in window")
+    print(f"  {len(lv_silences_window)} LV silence regions (raw)")
+
+    # Get speech regions (inverse of silence)
+    ru_speech = silence_regions_to_speech_regions(ru_silences, WINDOW_SECONDS)
+    lv_speech = silence_regions_to_speech_regions(lv_silences, WINDOW_SECONDS)
+
+    # Filter: only keep RU silence where LV actually has speech (real speaker switch)
+    # Remove RU silence where LV is ALSO silent (false detection — just a pause)
+    ru_real_silences = []
+    ru_false_silences = []
+    for sil_start, sil_end in ru_silences_window:
+        lv_has_speech = False
+        for sp_start, sp_end in lv_speech:
+            overlap_start = max(sil_start, sp_start)
+            overlap_end = min(sil_end, sp_end)
+            if overlap_end - overlap_start > 0.3:
+                lv_has_speech = True
+                break
+        if lv_has_speech:
+            ru_real_silences.append((sil_start, sil_end))
+        else:
+            ru_false_silences.append((sil_start, sil_end))
+
+    # Same for LV
+    lv_real_silences = []
+    lv_false_silences = []
+    for sil_start, sil_end in lv_silences_window:
+        ru_has_speech = False
+        for sp_start, sp_end in ru_speech:
+            overlap_start = max(sil_start, sp_start)
+            overlap_end = min(sil_end, sp_end)
+            if overlap_end - overlap_start > 0.3:
+                ru_has_speech = True
+                break
+        if ru_has_speech:
+            lv_real_silences.append((sil_start, sil_end))
+        else:
+            lv_false_silences.append((sil_start, sil_end))
+
+    print(f"  RU silence: {len(ru_real_silences)} real (LV speaking) + {len(ru_false_silences)} false (both silent)")
+    print(f"  LV silence: {len(lv_real_silences)} real (RU speaking) + {len(lv_false_silences)} false (both silent)")
 
     print("Drawing...")
     fig, (ax_ru, ax_lv) = plt.subplots(2, 1, figsize=(40, 10), sharex=True)
@@ -102,8 +142,8 @@ def main():
     ax_ru.grid(True, alpha=0.3)
     ax_ru.axhline(y=0, color="gray", linewidth=0.5)
 
-    # Overlay RU silence regions as green rectangles on RU waveform
-    for silence_start, silence_end in ru_silences_window:
+    # Overlay REAL RU silence as green (LV is speaking during these)
+    for silence_start, silence_end in ru_real_silences:
         width = silence_end - silence_start
         rect = patches.Rectangle(
             (silence_start, -1), width, 2,
@@ -131,13 +171,22 @@ def main():
     ax_lv.grid(True, alpha=0.3)
     ax_lv.axhline(y=0, color="gray", linewidth=0.5)
 
+    # FALSE RU silences as yellow (both tracks silent — just a pause, should be merged)
+    for silence_start, silence_end in ru_false_silences:
+        width = silence_end - silence_start
+        rect = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+        )
+        ax_ru.add_patch(rect)
+
     # Threshold lines on LV
     ax_lv.axhline(y=lv_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
     ax_lv.axhline(y=-lv_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
     ax_lv.text(WINDOW_SECONDS - 15, lv_threshold_line + 0.03, f"{NOISE_DB}dB", fontsize=8, color="#ff9800", fontweight="bold")
 
-    # Overlay RU silence (green) on LV track
-    for silence_start, silence_end in ru_silences_window:
+    # Overlay REAL RU silence (green) on LV track
+    for silence_start, silence_end in ru_real_silences:
         width = silence_end - silence_start
         rect = patches.Rectangle(
             (silence_start, -1), width, 2,
@@ -145,8 +194,17 @@ def main():
         )
         ax_lv.add_patch(rect)
 
-    # Overlay LV silence (pink) on BOTH tracks
-    for silence_start, silence_end in lv_silences_window:
+    # FALSE RU silences as yellow on LV track too
+    for silence_start, silence_end in ru_false_silences:
+        width = silence_end - silence_start
+        rect = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+        )
+        ax_lv.add_patch(rect)
+
+    # Overlay REAL LV silence (pink) on BOTH tracks
+    for silence_start, silence_end in lv_real_silences:
         width = silence_end - silence_start
         rect_ru = patches.Rectangle(
             (silence_start, -1), width, 2,
@@ -163,8 +221,22 @@ def main():
         second = minute * 60
         ax_lv.axvline(x=second, color="blue", linewidth=0.5, alpha=0.4)
 
+    # FALSE LV silences as yellow on both tracks
+    for silence_start, silence_end in lv_false_silences:
+        width = silence_end - silence_start
+        rect_ru = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+        )
+        ax_ru.add_patch(rect_ru)
+        rect_lv = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+        )
+        ax_lv.add_patch(rect_lv)
+
     fig.suptitle(
-        "Sermon Waveforms — RU silence (green) + LV silence (pink)",
+        "Green=real RU silence (LV speaks) | Pink=real LV silence (RU speaks) | Yellow=false silence (both quiet, merge)",
         fontsize=16, fontweight="bold",
     )
     fig.tight_layout()
