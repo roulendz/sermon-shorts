@@ -1,0 +1,177 @@
+"""
+Draw stacked waveforms with silence detection overlay.
+RU on top, LV on bottom. Green translucent rectangles for detected silence.
+
+Usage:
+    python scripts/draw_waveform_with_silence.py
+"""
+
+import subprocess
+import struct
+import sys
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
+
+from pipeline.silence_detection import detect_silence_regions
+
+BASE_DIR = Path(r"I:\2026-01-04 Pacelot mīlestības karogu\Audio RAW")
+RU_AUDIO = BASE_DIR / "2026-01-04 Pacelot mīlestības karogu_A04.wav"
+LV_AUDIO = BASE_DIR / "2026-01-04 Pacelot mīlestības karogu_A03.wav"
+OUTPUT_PNG = Path(r"I:\2026-01-04 Pacelot mīlestības karogu\diagnostics\waveform_RU_LV_silence.png")
+
+WINDOW_SECONDS = 300
+TARGET_SAMPLE_RATE = 8000
+NOISE_DB = -45
+MIN_SILENCE = 1.5
+
+
+def load_audio_as_mono(audio_path, duration_seconds):
+    command = [
+        "ffmpeg", "-y",
+        "-t", str(duration_seconds),
+        "-i", str(audio_path),
+        "-vn", "-acodec", "pcm_s16le",
+        "-ar", str(TARGET_SAMPLE_RATE),
+        "-ac", "1", "-f", "s16le", "pipe:1",
+    ]
+    result = subprocess.run(command, capture_output=True)
+    raw_bytes = result.stdout
+    sample_count = len(raw_bytes) // 2
+    samples = np.array(struct.unpack(f"<{sample_count}h", raw_bytes[:sample_count * 2]), dtype=np.float32)
+    return samples / 32768.0
+
+
+def main():
+    OUTPUT_PNG.parent.mkdir(parents=True, exist_ok=True)
+
+    print("Loading audio...")
+    ru_samples = load_audio_as_mono(RU_AUDIO, WINDOW_SECONDS)
+    lv_samples = load_audio_as_mono(LV_AUDIO, WINDOW_SECONDS)
+
+    ru_time = np.arange(len(ru_samples)) / TARGET_SAMPLE_RATE
+    lv_time = np.arange(len(lv_samples)) / TARGET_SAMPLE_RATE
+
+    # Normalize
+    ru_max = max(np.abs(ru_samples).max(), 0.01)
+    lv_max = max(np.abs(lv_samples).max(), 0.01)
+    ru_normalized = ru_samples / ru_max
+    lv_normalized = lv_samples / lv_max
+
+    # Calculate threshold lines in normalized space
+    # -25dB means 10^(-25/20) = ~0.0562 of full scale
+    threshold_linear = 10 ** (NOISE_DB / 20)  # relative to full scale (1.0)
+    ru_threshold_normalized = threshold_linear / ru_max * 32768.0 / 32768.0
+    lv_threshold_normalized = threshold_linear / lv_max * 32768.0 / 32768.0
+    # Actually: threshold is relative to digital full scale (32768)
+    # In normalized space (divided by track max), the line is at threshold_linear / (max/32768)
+    ru_threshold_line = threshold_linear * 32768.0 / (ru_max * 32768.0)
+    lv_threshold_line = threshold_linear * 32768.0 / (lv_max * 32768.0)
+    # Simplify: threshold_linear / ru_max * 1.0... no.
+    # ru_samples are already /32768, then /ru_max. So in normalized space:
+    # silence = amplitude < threshold_linear (in 0..1 space before normalization)
+    # In normalized space: threshold_linear / ru_max
+    ru_threshold_line = threshold_linear / ru_max
+    lv_threshold_line = threshold_linear / lv_max
+
+    print("Detecting RU silences...")
+    ru_silences = detect_silence_regions(str(RU_AUDIO), NOISE_DB, MIN_SILENCE)
+    ru_silences_window = [(s, min(e, WINDOW_SECONDS)) for s, e in ru_silences if s < WINDOW_SECONDS]
+    print(f"  {len(ru_silences_window)} RU silence regions in window")
+
+    print("Detecting LV silences...")
+    lv_silences = detect_silence_regions(str(LV_AUDIO), NOISE_DB, MIN_SILENCE)
+    lv_silences_window = [(s, min(e, WINDOW_SECONDS)) for s, e in lv_silences if s < WINDOW_SECONDS]
+    print(f"  {len(lv_silences_window)} LV silence regions in window")
+
+    print("Drawing...")
+    fig, (ax_ru, ax_lv) = plt.subplots(2, 1, figsize=(40, 10), sharex=True)
+
+    # RU waveform
+    ax_ru.plot(ru_time, ru_normalized, color="#d32f2f", linewidth=0.15, alpha=0.8)
+    ax_ru.fill_between(ru_time, ru_normalized, alpha=0.3, color="#d32f2f")
+    ax_ru.set_ylabel("RU (Pastor)", fontsize=14, fontweight="bold", color="#d32f2f")
+    ax_ru.set_ylim(-1, 1)
+    ax_ru.grid(True, alpha=0.3)
+    ax_ru.axhline(y=0, color="gray", linewidth=0.5)
+
+    # Overlay RU silence regions as green rectangles on RU waveform
+    for silence_start, silence_end in ru_silences_window:
+        width = silence_end - silence_start
+        rect = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#4caf50", alpha=0.25,
+        )
+        ax_ru.add_patch(rect)
+
+    # Threshold lines
+    ax_ru.axhline(y=ru_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
+    ax_ru.axhline(y=-ru_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
+    ax_ru.text(WINDOW_SECONDS - 15, ru_threshold_line + 0.03, f"{NOISE_DB}dB", fontsize=8, color="#ff9800", fontweight="bold")
+
+    # Minute markers
+    for minute in range(0, WINDOW_SECONDS // 60 + 1):
+        second = minute * 60
+        ax_ru.axvline(x=second, color="blue", linewidth=0.5, alpha=0.4)
+        ax_ru.text(second + 1, 0.9, f"{minute}:00", fontsize=8, color="blue", alpha=0.6)
+
+    # LV waveform
+    ax_lv.plot(lv_time, lv_normalized, color="#1976d2", linewidth=0.15, alpha=0.8)
+    ax_lv.fill_between(lv_time, lv_normalized, alpha=0.3, color="#1976d2")
+    ax_lv.set_ylabel("LV (Translator)", fontsize=14, fontweight="bold", color="#1976d2")
+    ax_lv.set_ylim(-1, 1)
+    ax_lv.set_xlabel("Time (seconds)", fontsize=12)
+    ax_lv.grid(True, alpha=0.3)
+    ax_lv.axhline(y=0, color="gray", linewidth=0.5)
+
+    # Threshold lines on LV
+    ax_lv.axhline(y=lv_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
+    ax_lv.axhline(y=-lv_threshold_line, color="#ff9800", linewidth=1.0, linestyle="--", alpha=0.7)
+    ax_lv.text(WINDOW_SECONDS - 15, lv_threshold_line + 0.03, f"{NOISE_DB}dB", fontsize=8, color="#ff9800", fontweight="bold")
+
+    # Overlay RU silence (green) on LV track
+    for silence_start, silence_end in ru_silences_window:
+        width = silence_end - silence_start
+        rect = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#4caf50", alpha=0.25,
+        )
+        ax_lv.add_patch(rect)
+
+    # Overlay LV silence (pink) on BOTH tracks
+    for silence_start, silence_end in lv_silences_window:
+        width = silence_end - silence_start
+        rect_ru = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#e91e63", alpha=0.15,
+        )
+        ax_ru.add_patch(rect_ru)
+        rect_lv = patches.Rectangle(
+            (silence_start, -1), width, 2,
+            linewidth=0, facecolor="#e91e63", alpha=0.15,
+        )
+        ax_lv.add_patch(rect_lv)
+
+    for minute in range(0, WINDOW_SECONDS // 60 + 1):
+        second = minute * 60
+        ax_lv.axvline(x=second, color="blue", linewidth=0.5, alpha=0.4)
+
+    fig.suptitle(
+        "Sermon Waveforms — RU silence (green) + LV silence (pink)",
+        fontsize=16, fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.savefig(str(OUTPUT_PNG), dpi=150, bbox_inches="tight")
+
+    print(f"\nSaved: {OUTPUT_PNG}")
+
+
+if __name__ == "__main__":
+    main()

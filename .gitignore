@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+*.16k.wav
+output/
+logs/
+.user_prefs.json
+.pytest_cache/
+.claude/
