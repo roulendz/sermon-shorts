@@ -74,7 +74,24 @@ def merge_bilingual_subtitles(
     secondary_speech = [(s, e) for s, e in secondary_speech_raw if e - s >= 0.5]
     _log(f"  {secondary_language_tag}: {len(secondary_speech_raw)} raw → {len(secondary_speech)} speech regions (≥0.5s)")
 
-    # Step 2: Smart merge — if a silence gap in one track also has silence
+    # Step 2a: Remove mic bleed — if one track has speech while the other
+    # track is actively speaking, it's bleed, not real speech. Remove it.
+    _log("Removing mic bleed (speech during other track's speech)...")
+    primary_speech = _remove_mic_bleed(primary_speech, secondary_speech)
+    secondary_speech = _remove_mic_bleed(secondary_speech, primary_speech)
+    _log(f"  {primary_language_tag}: {len(primary_speech)} regions after bleed removal")
+    _log(f"  {secondary_language_tag}: {len(secondary_speech)} regions after bleed removal")
+
+    # Step 2b: RU priority — when RU talks over LV start, push LV start
+    # forward to align with RU silence start (RU always finishes first).
+    _log("Aligning LV to RU boundaries (RU priority)...")
+    secondary_speech_before_align = len(secondary_speech)
+    secondary_speech = _align_secondary_to_primary(
+        primary_speech, secondary_speech,
+    )
+    _log(f"  {secondary_language_tag}: {secondary_speech_before_align} → {len(secondary_speech)} regions after alignment")
+
+    # Step 2c: Smart merge — if a silence gap in one track also has silence
     # in the other track, it's just a pause (same speaker continues).
     # Only keep silence boundaries where the OTHER track has speech.
     _log("Smart-merging speech regions (pause vs speaker switch)...")
@@ -612,6 +629,77 @@ def _refine_turn_boundaries_and_close_gaps(
             refined[i + 1]["start_seconds"] = midpoint
 
     return refined
+
+
+def _align_secondary_to_primary(
+    primary_speech: list[tuple[float, float]],
+    secondary_speech: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """
+    RU (primary) has priority. Trim LV (secondary) speech on BOTH sides:
+
+    1. If RU speech overlaps LV START → push LV start forward to where RU ends
+       (pastor still talking when translator starts → wait for pastor)
+
+    2. If RU speech overlaps LV END → pull LV end backward to where RU starts
+       (pastor starts speaking before translator finishes → translator stops)
+
+    If overlap consumes the entire secondary region, remove it.
+    """
+    aligned = []
+    for sec_start, sec_end in secondary_speech:
+        new_start = sec_start
+        new_end = sec_end
+
+        for pri_start, pri_end in primary_speech:
+            if pri_start < new_end and pri_end > new_start:
+                # Primary overlaps with start of secondary → push start forward
+                if pri_end > new_start and pri_end < new_end:
+                    new_start = max(new_start, pri_end)
+
+                # Primary overlaps with end of secondary → pull end backward
+                if pri_start > new_start and pri_start < new_end:
+                    new_end = min(new_end, pri_start)
+
+        if new_start < new_end and new_end - new_start >= 0.2:
+            aligned.append((new_start, new_end))
+
+    return aligned
+
+
+def _remove_mic_bleed(
+    speech_regions: list[tuple[float, float]],
+    other_track_speech: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """
+    Remove speech regions that are mostly overlapping with the other track's
+    speech. If the other speaker is talking and this track picks up audio,
+    it's mic bleed — not real speech.
+
+    A region is considered bleed if more than 50% of its duration overlaps
+    with the other track's speech.
+    """
+    cleaned = []
+    for region_start, region_end in speech_regions:
+        region_duration = region_end - region_start
+
+        # Calculate how much of this region overlaps with other track's speech
+        overlap_with_other = 0.0
+        for other_start, other_end in other_track_speech:
+            overlap_start = max(region_start, other_start)
+            overlap_end = min(region_end, other_end)
+            if overlap_start < overlap_end:
+                overlap_with_other += overlap_end - overlap_start
+
+        overlap_ratio = overlap_with_other / region_duration if region_duration > 0 else 0
+
+        if overlap_ratio > 0.5:
+            # More than half overlaps with other speaker → mic bleed, remove
+            continue
+        else:
+            cleaned.append((region_start, region_end))
+
+    return cleaned
 
 
 def _merge_pauses_where_other_track_is_silent(
