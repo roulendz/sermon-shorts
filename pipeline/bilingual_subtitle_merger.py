@@ -74,12 +74,11 @@ def merge_bilingual_subtitles(
     secondary_speech = [(s, e) for s, e in secondary_speech_raw if e - s >= 0.5]
     _log(f"  {secondary_language_tag}: {len(secondary_speech_raw)} raw → {len(secondary_speech)} speech regions (≥0.5s)")
 
-    # Step 2a: Remove mic bleed — if one track has speech while the other
-    # track is actively speaking, it's bleed, not real speech. Remove it.
-    _log("Removing mic bleed (speech during other track's speech)...")
-    primary_speech = _remove_mic_bleed(primary_speech, secondary_speech)
+    # Step 2a: Remove mic bleed — only on secondary (LV) track.
+    # Primary (RU) is the priority speaker, never remove RU speech.
+    # LV speech that overlaps with RU speech is mic bleed from pastor's mic.
+    _log(f"Removing mic bleed on {secondary_language_tag} track (RU priority — never remove {primary_language_tag})...")
     secondary_speech = _remove_mic_bleed(secondary_speech, primary_speech)
-    _log(f"  {primary_language_tag}: {len(primary_speech)} regions after bleed removal")
     _log(f"  {secondary_language_tag}: {len(secondary_speech)} regions after bleed removal")
 
     # Step 2b: RU priority — when RU talks over LV start, push LV start

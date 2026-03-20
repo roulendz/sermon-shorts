@@ -97,14 +97,13 @@ def main():
 
     # Remove mic bleed: speech that's mostly during other track's speech
     from pipeline.bilingual_subtitle_merger import _remove_mic_bleed, _align_secondary_to_primary
-    ru_speech = _remove_mic_bleed(ru_speech_raw, lv_speech_raw)
-    lv_speech = _remove_mic_bleed(lv_speech_raw, ru_speech_raw)
+    ru_speech = ru_speech_raw  # RU is priority — never remove RU speech
+    lv_speech = _remove_mic_bleed(lv_speech_raw, ru_speech)
 
-    # Find bleed regions (removed speech)
-    ru_bleed = [r for r in ru_speech_raw if r not in ru_speech]
+    # Find bleed regions (removed LV speech only)
+    ru_bleed = []
     lv_bleed = [r for r in lv_speech_raw if r not in lv_speech]
-    print(f"  RU mic bleed removed: {len(ru_bleed)} regions")
-    print(f"  LV mic bleed removed: {len(lv_bleed)} regions")
+    print(f"  LV mic bleed removed: {len(lv_bleed)} regions (RU kept as priority)")
 
     # RU priority: trim LV on both sides where RU overlaps
     lv_speech_before_align = lv_speech[:]
@@ -223,12 +222,12 @@ def main():
         )
         ax_lv.add_patch(rect_lv)
 
-    # FALSE RU silences as yellow (both tracks silent — just a pause, should be merged)
+    # FALSE RU silences as pink (pastor just paused — merged, RU still active speaker)
     for silence_start, silence_end in ru_false_silences:
         width = silence_end - silence_start
         rect = patches.Rectangle(
             (silence_start, -1), width, 2,
-            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+            linewidth=0, facecolor="#e91e63", alpha=0.15,
         )
         ax_ru.add_patch(rect)
 
@@ -246,12 +245,12 @@ def main():
         )
         ax_lv.add_patch(rect)
 
-    # FALSE RU silences as yellow on LV track too
+    # FALSE RU silences as pink on LV track too
     for silence_start, silence_end in ru_false_silences:
         width = silence_end - silence_start
         rect = patches.Rectangle(
             (silence_start, -1), width, 2,
-            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+            linewidth=0, facecolor="#e91e63", alpha=0.15,
         )
         ax_lv.add_patch(rect)
 
@@ -301,22 +300,22 @@ def main():
         )
         ax_lv.add_patch(rect_lv)
 
-    # FALSE LV silences as yellow on both tracks
+    # FALSE LV silences as green on both tracks (translator paused, LV still active)
     for silence_start, silence_end in lv_false_silences:
         width = silence_end - silence_start
         rect_ru = patches.Rectangle(
             (silence_start, -1), width, 2,
-            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+            linewidth=0, facecolor="#4caf50", alpha=0.25,
         )
         ax_ru.add_patch(rect_ru)
         rect_lv = patches.Rectangle(
             (silence_start, -1), width, 2,
-            linewidth=0, facecolor="#ffeb3b", alpha=0.35,
+            linewidth=0, facecolor="#4caf50", alpha=0.25,
         )
         ax_lv.add_patch(rect_lv)
 
     fig.suptitle(
-        "Green=real silence | Pink=real LV silence | Yellow=false silence (merge) | Orange=mic bleed (removed)",
+        "Green = RU silence (LV speaks) | Pink = LV silence (RU speaks)",
         fontsize=16, fontweight="bold",
     )
     fig.tight_layout()
