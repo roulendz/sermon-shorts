@@ -90,19 +90,18 @@ def merge_bilingual_subtitles(
     )
     _log(f"  {secondary_language_tag}: {secondary_speech_before_align} → {len(secondary_speech)} regions after alignment")
 
-    # Step 2c: Dynamic buffer — where RU and LV speech overlap,
-    # split the overlap at the midpoint so each side gives up half.
-    _log("Applying dynamic buffer to minimize speech overlaps...")
-    overlaps_before = _find_overlaps(primary_speech, secondary_speech)
-    if overlaps_before:
-        total_overlap = sum(d for _, _, d in overlaps_before)
-        _log(f"  {len(overlaps_before)} overlaps ({total_overlap:.1f}s) — splitting at midpoints...")
-        primary_speech, secondary_speech = _split_overlaps_at_midpoint(
-            primary_speech, secondary_speech,
-        )
-        overlaps_after = _find_overlaps(primary_speech, secondary_speech)
-        total_after = sum(d for _, _, d in overlaps_after)
-        _log(f"  After: {len(overlaps_after)} overlaps ({total_after:.1f}s)")
+    # Step 2c: Fill gaps using alternation logic (RU→LV→RU→LV)
+    # If gap exists between two RU regions → must be LV (detection missed it)
+    # If gap exists between two LV regions → must be RU
+    # If gap between RU and LV → split at midpoint
+    _log("Filling gaps using alternation logic (no white gaps)...")
+    primary_before_fill = len(primary_speech)
+    secondary_before_fill = len(secondary_speech)
+    primary_speech, secondary_speech = _fill_gaps_by_alternation(
+        primary_speech, secondary_speech,
+    )
+    _log(f"  {primary_language_tag}: {primary_before_fill} → {len(primary_speech)} regions")
+    _log(f"  {secondary_language_tag}: {secondary_before_fill} → {len(secondary_speech)} regions")
 
     # Step 2d: Smart merge — if a silence gap in one track also has silence
     # in the other track, it's just a pause (same speaker continues).
@@ -644,21 +643,115 @@ def _refine_turn_boundaries_and_close_gaps(
     return refined
 
 
+def _fill_gaps_by_alternation(
+    primary_speech: list[tuple[float, float]],
+    secondary_speech: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """
+    Fill all gaps in the timeline using RU→LV→RU→LV alternation logic.
+
+    Every moment must belong to either primary or secondary:
+    - Gap between two primary regions → assign to secondary
+    - Gap between two secondary regions → assign to primary
+    - Gap between primary and secondary → split at midpoint
+    - Gap at same boundary → split at midpoint
+
+    Also resolves overlaps by splitting at midpoint.
+    """
+    # Tag all regions
+    tagged = []
+    for s, e in primary_speech:
+        tagged.append((s, e, "P"))
+    for s, e in secondary_speech:
+        tagged.append((s, e, "S"))
+    tagged.sort(key=lambda x: x[0])
+
+    if not tagged:
+        return list(primary_speech), list(secondary_speech)
+
+    # First resolve overlaps between adjacent regions
+    resolved = []
+    for region in tagged:
+        if not resolved:
+            resolved.append(region)
+            continue
+        prev_s, prev_e, prev_label = resolved[-1]
+        curr_s, curr_e, curr_label = region
+
+        if curr_s < prev_e:
+            # Overlap — split at midpoint
+            midpoint = (curr_s + min(prev_e, curr_e)) / 2
+            resolved[-1] = (prev_s, midpoint, prev_label)
+            resolved.append((midpoint, curr_e, curr_label))
+        else:
+            resolved.append(region)
+
+    # Now fill gaps between consecutive regions
+    filled = [resolved[0]]
+    for i in range(1, len(resolved)):
+        prev_s, prev_e, prev_label = filled[-1]
+        curr_s, curr_e, curr_label = resolved[i]
+
+        gap = curr_s - prev_e
+        if gap > 0.05:  # gap exists
+            if prev_label == curr_label:
+                # Same language on both sides → gap belongs to OTHER language
+                gap_label = "S" if prev_label == "P" else "P"
+                filled.append((prev_e, curr_s, gap_label))
+            else:
+                # Different languages → split gap at midpoint
+                midpoint = (prev_e + curr_s) / 2
+                filled[-1] = (prev_s, midpoint, prev_label)
+                filled.append((midpoint, curr_e, curr_label))
+                continue
+
+        filled.append((curr_s, curr_e, curr_label))
+
+    # Merge consecutive same-label regions
+    merged = [filled[0]]
+    for s, e, label in filled[1:]:
+        if label == merged[-1][2] and s <= merged[-1][1] + 0.05:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e), label)
+        else:
+            merged.append((s, e, label))
+
+    # Split back into primary and secondary
+    new_primary = [(s, e) for s, e, l in merged if l == "P"]
+    new_secondary = [(s, e) for s, e, l in merged if l == "S"]
+
+    return new_primary, new_secondary
+
+
 def _split_overlaps_at_midpoint(
     regions_a: list[tuple[float, float]],
     regions_b: list[tuple[float, float]],
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """
-    Where speech regions from two tracks overlap, split the overlap
-    at the midpoint — each track gives up half the overlapping time.
+    Resolve both overlaps AND gaps between two tracks' speech regions
+    by splitting at the midpoint.
 
-    This creates a dynamic buffer that minimizes overlap between tracks.
-    The track that started first keeps up to the midpoint, the other
-    starts from the midpoint.
+    - Overlaps: each track gives up half (split at midpoint)
+    - Gaps: each track extends half (meet at midpoint)
+
+    Result: the entire timeline is covered by either A or B with no
+    overlaps and no gaps.
     """
+    # Combine all regions with labels, sort by start time
+    tagged = []
+    for s, e in regions_a:
+        tagged.append((s, e, "A"))
+    for s, e in regions_b:
+        tagged.append((s, e, "B"))
+    tagged.sort(key=lambda x: x[0])
+
+    if not tagged:
+        return list(regions_a), list(regions_b)
+
+    # Build resolved lists
     resolved_a = list(regions_a)
     resolved_b = list(regions_b)
 
+    # Step 1: Resolve overlaps — split at midpoint
     changed = True
     while changed:
         changed = False
@@ -670,22 +763,44 @@ def _split_overlaps_at_midpoint(
                 overlap_start = max(a_start, b_start)
                 overlap_end = min(a_end, b_end)
 
-                if overlap_start < overlap_end - 0.05:  # >50ms overlap
+                if overlap_start < overlap_end - 0.05:
                     midpoint = (overlap_start + overlap_end) / 2
-
-                    # Trim whichever side the overlap falls on
                     if a_start < b_start:
-                        # A started first, trim A's end and B's start
                         resolved_a[i] = (a_start, midpoint)
                         resolved_b[j] = (midpoint, b_end)
                     else:
-                        # B started first, trim B's end and A's start
                         resolved_b[j] = (b_start, midpoint)
                         resolved_a[i] = (midpoint, a_end)
                     changed = True
                     break
             if changed:
                 break
+
+    # Step 2: Close gaps — extend each side to midpoint of the gap
+    all_regions = []
+    for i, (s, e) in enumerate(resolved_a):
+        all_regions.append((s, e, "A", i))
+    for i, (s, e) in enumerate(resolved_b):
+        all_regions.append((s, e, "B", i))
+    all_regions.sort(key=lambda x: x[0])
+
+    for idx in range(len(all_regions) - 1):
+        curr_start, curr_end, curr_label, curr_i = all_regions[idx]
+        next_start, next_end, next_label, next_i = all_regions[idx + 1]
+
+        gap = next_start - curr_end
+        if gap > 0.05:  # >50ms gap
+            midpoint = (curr_end + next_start) / 2
+            # Extend current region's end to midpoint
+            if curr_label == "A":
+                resolved_a[curr_i] = (resolved_a[curr_i][0], midpoint)
+            else:
+                resolved_b[curr_i] = (resolved_b[curr_i][0], midpoint)
+            # Extend next region's start to midpoint
+            if next_label == "A":
+                resolved_a[next_i] = (midpoint, resolved_a[next_i][1])
+            else:
+                resolved_b[next_i] = (midpoint, resolved_b[next_i][1])
 
     # Remove regions that became too small
     resolved_a = [(s, e) for s, e in resolved_a if e - s >= 0.1]
