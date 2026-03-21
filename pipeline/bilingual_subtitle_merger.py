@@ -90,7 +90,21 @@ def merge_bilingual_subtitles(
     )
     _log(f"  {secondary_language_tag}: {secondary_speech_before_align} → {len(secondary_speech)} regions after alignment")
 
-    # Step 2c: Smart merge — if a silence gap in one track also has silence
+    # Step 2c: Dynamic buffer — where RU and LV speech overlap,
+    # split the overlap at the midpoint so each side gives up half.
+    _log("Applying dynamic buffer to minimize speech overlaps...")
+    overlaps_before = _find_overlaps(primary_speech, secondary_speech)
+    if overlaps_before:
+        total_overlap = sum(d for _, _, d in overlaps_before)
+        _log(f"  {len(overlaps_before)} overlaps ({total_overlap:.1f}s) — splitting at midpoints...")
+        primary_speech, secondary_speech = _split_overlaps_at_midpoint(
+            primary_speech, secondary_speech,
+        )
+        overlaps_after = _find_overlaps(primary_speech, secondary_speech)
+        total_after = sum(d for _, _, d in overlaps_after)
+        _log(f"  After: {len(overlaps_after)} overlaps ({total_after:.1f}s)")
+
+    # Step 2d: Smart merge — if a silence gap in one track also has silence
     # in the other track, it's just a pause (same speaker continues).
     # Only keep silence boundaries where the OTHER track has speech.
     _log("Smart-merging speech regions (pause vs speaker switch)...")
@@ -628,6 +642,56 @@ def _refine_turn_boundaries_and_close_gaps(
             refined[i + 1]["start_seconds"] = midpoint
 
     return refined
+
+
+def _split_overlaps_at_midpoint(
+    regions_a: list[tuple[float, float]],
+    regions_b: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """
+    Where speech regions from two tracks overlap, split the overlap
+    at the midpoint — each track gives up half the overlapping time.
+
+    This creates a dynamic buffer that minimizes overlap between tracks.
+    The track that started first keeps up to the midpoint, the other
+    starts from the midpoint.
+    """
+    resolved_a = list(regions_a)
+    resolved_b = list(regions_b)
+
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(resolved_a)):
+            for j in range(len(resolved_b)):
+                a_start, a_end = resolved_a[i]
+                b_start, b_end = resolved_b[j]
+
+                overlap_start = max(a_start, b_start)
+                overlap_end = min(a_end, b_end)
+
+                if overlap_start < overlap_end - 0.05:  # >50ms overlap
+                    midpoint = (overlap_start + overlap_end) / 2
+
+                    # Trim whichever side the overlap falls on
+                    if a_start < b_start:
+                        # A started first, trim A's end and B's start
+                        resolved_a[i] = (a_start, midpoint)
+                        resolved_b[j] = (midpoint, b_end)
+                    else:
+                        # B started first, trim B's end and A's start
+                        resolved_b[j] = (b_start, midpoint)
+                        resolved_a[i] = (midpoint, a_end)
+                    changed = True
+                    break
+            if changed:
+                break
+
+    # Remove regions that became too small
+    resolved_a = [(s, e) for s, e in resolved_a if e - s >= 0.1]
+    resolved_b = [(s, e) for s, e in resolved_b if e - s >= 0.1]
+
+    return resolved_a, resolved_b
 
 
 def _align_secondary_to_primary(

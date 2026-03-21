@@ -96,7 +96,7 @@ def main():
     lv_speech_raw = silence_regions_to_speech_regions(lv_silences, WINDOW_SECONDS)
 
     # Remove mic bleed: speech that's mostly during other track's speech
-    from pipeline.bilingual_subtitle_merger import _remove_mic_bleed, _align_secondary_to_primary
+    from pipeline.bilingual_subtitle_merger import _remove_mic_bleed, _align_secondary_to_primary, _split_overlaps_at_midpoint
     ru_speech = ru_speech_raw  # RU is priority — never remove RU speech
     lv_speech = _remove_mic_bleed(lv_speech_raw, ru_speech)
 
@@ -130,6 +130,27 @@ def main():
             if not found_partial:
                 lv_alignment_trims.append(old_region)
     print(f"  LV alignment trims (RU priority): {len(lv_alignment_trims)} regions")
+
+    # Dynamic buffer: split remaining overlaps at midpoint
+    ru_speech_before_buffer = ru_speech[:]
+    lv_speech_before_buffer = lv_speech[:]
+    ru_speech, lv_speech = _split_overlaps_at_midpoint(ru_speech, lv_speech)
+
+    # Find buffer trims (regions that got trimmed by midpoint split)
+    buffer_trims = []
+    for old_s, old_e in ru_speech_before_buffer:
+        for new_s, new_e in ru_speech:
+            if abs(old_s - new_s) < 0.01 and new_e < old_e - 0.05:
+                buffer_trims.append((new_e, old_e, "RU"))
+            if abs(old_e - new_e) < 0.01 and new_s > old_s + 0.05:
+                buffer_trims.append((old_s, new_s, "RU"))
+    for old_s, old_e in lv_speech_before_buffer:
+        for new_s, new_e in lv_speech:
+            if abs(old_s - new_s) < 0.01 and new_e < old_e - 0.05:
+                buffer_trims.append((new_e, old_e, "LV"))
+            if abs(old_e - new_e) < 0.01 and new_s > old_s + 0.05:
+                buffer_trims.append((old_s, new_s, "LV"))
+    print(f"  Dynamic buffer trims: {len(buffer_trims)} regions")
 
     # Rebuild silences from cleaned speech to classify real vs false
     # Filter: only keep RU silence where LV actually has speech (real speaker switch)
