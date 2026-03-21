@@ -311,7 +311,10 @@ class SegmentReviewScreen(Screen):
 
         try:
             self.app.call_from_thread(log.write_info, f"Loading: {response_path.name}")
-            response_text = response_path.read_text(encoding="utf-8")
+            try:
+                response_text = response_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                response_text = response_path.read_text(encoding="utf-8", errors="replace")
 
             all_subtitles = load_subtitle_file(self._pipeline_state.subtitle_file_path)
             segments = parse_segments_from_manus_response(response_text, all_subtitles)
