@@ -32,9 +32,11 @@ RU_AUDIO = BASE_DIR / "2026-01-04 Pacelot mīlestības karogu_A04.wav"
 LV_AUDIO = BASE_DIR / "2026-01-04 Pacelot mīlestības karogu_A03.wav"
 RU_CONTENT_JSON = BASE_DIR / "transkriptor_raw_A04_RU.json"
 LV_CONTENT_JSON = BASE_DIR / "transkriptor_raw_A03_LV.json"
-OUTPUT_SRT = BASE_DIR.parent / "transcriptions" / "2026-01-04_Pacelot_merged_RU_LV_v2.srt"
+from datetime import datetime
+_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_SRT = BASE_DIR.parent / "transcriptions" / f"{_timestamp}_merged_RU_LV.srt"
 
-AUDIO_TO_VIDEO_OFFSET_SECONDS = 10.0
+AUDIO_TO_VIDEO_OFFSET_SECONDS = 9.13
 NOISE_THRESHOLD_DB = -45
 VALIDATION_WINDOW_SECONDS = 300  # validate first 5 min
 

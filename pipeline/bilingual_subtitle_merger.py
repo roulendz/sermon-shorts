@@ -90,53 +90,23 @@ def merge_bilingual_subtitles(
     )
     _log(f"  {secondary_language_tag}: {secondary_speech_before_align} → {len(secondary_speech)} regions after alignment")
 
-    # Step 2c: Fill gaps using alternation logic (RU→LV→RU→LV)
-    # If gap exists between two RU regions → must be LV (detection missed it)
-    # If gap exists between two LV regions → must be RU
-    # If gap between RU and LV → split at midpoint
-    _log("Filling gaps using alternation logic (no white gaps)...")
-    primary_before_fill = len(primary_speech)
-    secondary_before_fill = len(secondary_speech)
-    primary_speech, secondary_speech = _fill_gaps_by_alternation(
-        primary_speech, secondary_speech,
+    # Step 3: Split text using THESE speech regions (after bleed + alignment).
+    # These match the PNG visualization — original detection, not processed.
+    # Transkriptor timestamps tell us WHICH regions the text covers.
+    # Speech regions provide EXACT timing.
+    _log(f"Splitting {primary_language_tag} text across speech regions...")
+    primary_entries = _split_content_at_silence_boundaries(
+        primary_content, primary_speech, primary_language_tag,
     )
-    _log(f"  {primary_language_tag}: {primary_before_fill} → {len(primary_speech)} regions")
-    _log(f"  {secondary_language_tag}: {secondary_before_fill} → {len(secondary_speech)} regions")
+    _log(f"  {primary_language_tag}: {len(primary_entries)} entries")
 
-    # Step 2d: Smart merge — if a silence gap in one track also has silence
-    # in the other track, it's just a pause (same speaker continues).
-    # Only keep silence boundaries where the OTHER track has speech.
-    _log("Smart-merging speech regions (pause vs speaker switch)...")
-    primary_speech_before = len(primary_speech)
-    secondary_speech_before = len(secondary_speech)
-
-    primary_speech = _merge_pauses_where_other_track_is_silent(
-        primary_speech, secondary_speech,
+    _log(f"Splitting {secondary_language_tag} text across speech regions...")
+    secondary_entries = _split_content_at_silence_boundaries(
+        secondary_content, secondary_speech, secondary_language_tag,
     )
-    secondary_speech = _merge_pauses_where_other_track_is_silent(
-        secondary_speech, primary_speech,
-    )
-    _log(f"  {primary_language_tag}: {primary_speech_before} → {len(primary_speech)} regions")
-    _log(f"  {secondary_language_tag}: {secondary_speech_before} → {len(secondary_speech)} regions")
+    _log(f"  {secondary_language_tag}: {len(secondary_entries)} entries")
 
-    # Step 3: Speech regions are GROUND TRUTH for timing.
-    # Transkriptor only provides WORDS (timestamps are thrown away).
-    # Flow text sequentially into speech regions, proportional to duration.
-    _log(f"Flowing {primary_language_tag} text into speech regions...")
-    primary_all_text = _extract_all_text_from_content(primary_content)
-    primary_entries = _flow_text_into_regions(
-        primary_all_text, primary_speech, primary_language_tag,
-    )
-    _log(f"  {primary_language_tag}: {len(primary_entries)} entries from {len(primary_speech)} regions")
-
-    _log(f"Flowing {secondary_language_tag} text into speech regions...")
-    secondary_all_text = _extract_all_text_from_content(secondary_content)
-    secondary_entries = _flow_text_into_regions(
-        secondary_all_text, secondary_speech, secondary_language_tag,
-    )
-    _log(f"  {secondary_language_tag}: {len(secondary_entries)} entries from {len(secondary_speech)} regions")
-
-    # Step 4: Combine and sort by time — already alternating from regions
+    # Step 4: Combine, sort by time — natural alternation from regions
     all_entries = primary_entries + secondary_entries
     all_entries.sort(key=lambda e: e["start_seconds"])
     _log(f"  {len(all_entries)} final subtitle entries")
@@ -176,6 +146,75 @@ def load_transkriptor_content_from_json(json_file_path: Path) -> list[dict]:
     if "body" in data and isinstance(data["body"], dict):
         return data["body"].get("content", [])
     return data.get("content", [])
+
+
+def _map_text_to_regions_by_midpoint(
+    content_entries: list[dict],
+    speech_regions: list[tuple[float, float]],
+    language_tag: str,
+) -> list[dict]:
+    """
+    Map Transkriptor text to speech regions using timestamps as HINTS.
+
+    - Speech regions provide EXACT timing (start/end)
+    - Transkriptor timestamps are HINTS for which text belongs where
+    - Each content entry maps to the region containing its midpoint
+    - Multiple entries in same region → combine text
+    - Region with no entries → skip (no subtitle)
+
+    This keeps text synced with the correct speech moment while using
+    accurate speech region boundaries for timing.
+    """
+    if not content_entries or not speech_regions:
+        return []
+
+    # For each region, collect matching content entries
+    region_texts: dict[int, list[str]] = {}
+
+    for content_entry in content_entries:
+        text = content_entry.get("text", "").strip()
+        if not text:
+            continue
+
+        content_start = content_entry["StartTime"] / 1000.0
+        content_end = content_entry["EndTime"] / 1000.0
+        content_midpoint = (content_start + content_end) / 2.0
+
+        # Find which region this entry's midpoint falls in
+        best_region_index = None
+        best_distance = float("inf")
+
+        for region_index, (region_start, region_end) in enumerate(speech_regions):
+            if region_start <= content_midpoint <= region_end:
+                best_region_index = region_index
+                break
+            # Track nearest region as fallback
+            distance = min(abs(content_midpoint - region_start),
+                          abs(content_midpoint - region_end))
+            if distance < best_distance:
+                best_distance = distance
+                best_region_index = region_index
+
+        if best_region_index is not None:
+            if best_region_index not in region_texts:
+                region_texts[best_region_index] = []
+            region_texts[best_region_index].append(text)
+
+    # Build subtitle entries from regions that have text
+    entries = []
+    for region_index, (region_start, region_end) in enumerate(speech_regions):
+        if region_index not in region_texts:
+            continue
+
+        combined_text = " ".join(region_texts[region_index])
+        entries.append({
+            "start_seconds": region_start,
+            "end_seconds": region_end,
+            "text": combined_text,
+            "language_tag": language_tag,
+        })
+
+    return entries
 
 
 def _extract_all_text_from_content(content_entries: list[dict]) -> str:
@@ -285,14 +324,15 @@ def _split_content_at_silence_boundaries(
     language_tag: str,
 ) -> list[dict]:
     """
-    Split Transkriptor entries that span multiple speech regions.
+    Split Transkriptor entries across speech regions using word count
+    proportional to region duration.
 
-    Transkriptor ignores silences and groups text into sentences.
-    When an entry spans multiple speech regions, we:
-      1. Split text into sentences (by period boundaries)
-      2. Assign whole sentences to speech regions by duration proportion
-      3. Short tail sentences (1-3 words ending with .) stay with previous chunk
-      4. Only split within a sentence as last resort
+    For each entry:
+    1. Find all speech regions within its StartTime→EndTime range
+    2. Calculate total word count and total speech duration
+    3. Each region gets words proportional to its duration
+    4. Prefer splitting at sentence boundaries (periods)
+    5. Fall back to word-level splitting when no period available
     """
     subtitle_entries = []
 
@@ -304,7 +344,6 @@ def _split_content_at_silence_boundaries(
         if not text:
             continue
 
-        # Find all speech regions that overlap with this entry
         covering_regions = _find_covering_speech_regions(
             entry_start_seconds, entry_end_seconds, speech_regions,
         )
@@ -328,16 +367,19 @@ def _split_content_at_silence_boundaries(
             })
             continue
 
-        # Multiple speech regions — split by sentence boundaries
-        sentences = _split_into_sentences(text)
+        # Multiple speech regions — split by word count / duration
+        words = text.split()
+        total_word_count = len(words)
+        if total_word_count == 0:
+            continue
 
         region_durations = [
-            min(region_end, entry_end_seconds) - max(region_start, entry_start_seconds)
+            max(0, min(region_end, entry_end_seconds) - max(region_start, entry_start_seconds))
             for region_start, region_end in covering_regions
         ]
-        total_speech_duration = sum(d for d in region_durations if d > 0)
+        total_speech_duration = sum(region_durations)
 
-        if total_speech_duration <= 0 or not sentences:
+        if total_speech_duration <= 0:
             subtitle_entries.append({
                 "start_seconds": entry_start_seconds,
                 "end_seconds": entry_end_seconds,
@@ -346,20 +388,70 @@ def _split_content_at_silence_boundaries(
             })
             continue
 
-        # Assign sentences to regions proportionally by duration
-        chunks = _assign_sentences_to_regions(
-            sentences, covering_regions, region_durations, total_speech_duration,
-        )
+        # Distribute words proportionally by region duration
+        word_index = 0
+        for region_index, (region_start, region_end) in enumerate(covering_regions):
+            region_duration = region_durations[region_index]
+            if region_duration <= 0:
+                continue
 
-        for chunk_text, region_start, region_end in chunks:
+            is_last = region_index == len(covering_regions) - 1
+
+            if is_last:
+                # Last region gets all remaining words
+                chunk_words = words[word_index:]
+            else:
+                # Calculate proportional word count
+                proportion = region_duration / total_speech_duration
+                target_count = max(1, round(total_word_count * proportion))
+
+                # Try to split at punctuation (period best, comma good)
+                best_split = word_index + target_count
+                # Look for period near the target split point (+/- 3 words)
+                found_period = False
+                for offset in range(0, 4):
+                    for candidate in [best_split + offset, best_split - offset]:
+                        if word_index < candidate <= len(words):
+                            last_word = words[candidate - 1]
+                            if last_word.endswith((".","!","?")):
+                                best_split = candidate
+                                found_period = True
+                                break
+                    if found_period:
+                        break
+
+                # If no period found, try comma (+/- 3 words)
+                if not found_period:
+                    for offset in range(0, 4):
+                        for candidate in [best_split + offset, best_split - offset]:
+                            if word_index < candidate <= len(words):
+                                last_word = words[candidate - 1]
+                                if last_word.endswith(","):
+                                    best_split = candidate
+                                    found_period = True
+                                    break
+                        if found_period:
+                            break
+
+                best_split = min(best_split, len(words))
+                chunk_words = words[word_index:best_split]
+
+            word_index += len(chunk_words)
+
+            if not chunk_words:
+                continue
+
+            chunk_text = " ".join(chunk_words)
             chunk_start = max(entry_start_seconds, region_start)
             chunk_end = min(entry_end_seconds, region_end)
-            if chunk_end <= chunk_start or not chunk_text.strip():
+
+            if chunk_end <= chunk_start:
                 continue
+
             subtitle_entries.append({
                 "start_seconds": chunk_start,
                 "end_seconds": chunk_end,
-                "text": chunk_text.strip(),
+                "text": chunk_text,
                 "language_tag": language_tag,
             })
 
