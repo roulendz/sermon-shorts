@@ -121,6 +121,15 @@ def _extract_date_prefix(video_filename: str) -> str:
     return match.group(1) if match else ""
 
 
+def _format_duration_label(duration_seconds: float) -> str:
+    """Format duration as human-readable label: '1m30s', '45s', '2m05s'."""
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    if minutes > 0:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
 def build_output_video_file_path(
     output_directory: Path,
     segment: VideoSegment,
@@ -131,10 +140,11 @@ def build_output_video_file_path(
         date_prefix = _extract_date_prefix(video_file_path.stem)
 
     title = _sanitize_filename(segment.suggested_title or f"Segment {segment.index}")
+    duration_label = _format_duration_label(segment.duration_seconds)
     if date_prefix:
-        filename = f"{date_prefix} {title}.mp4"
+        filename = f"{date_prefix} {title} [{duration_label}].mp4"
     else:
-        filename = f"{title}.mp4"
+        filename = f"{title} [{duration_label}].mp4"
 
     return output_directory / filename
 
@@ -149,9 +159,10 @@ def build_output_subtitle_file_path(
         date_prefix = _extract_date_prefix(video_file_path.stem)
 
     title = _sanitize_filename(segment.suggested_title or f"Segment {segment.index}")
+    duration_label = _format_duration_label(segment.duration_seconds)
     if date_prefix:
-        filename = f"{date_prefix} {title}.srt"
+        filename = f"{date_prefix} {title} [{duration_label}].srt"
     else:
-        filename = f"{title}.srt"
+        filename = f"{title} [{duration_label}].srt"
 
     return output_directory / filename
