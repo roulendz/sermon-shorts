@@ -8,10 +8,14 @@ them and clicks "Cut Videos" to proceed to the cutting screen.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+from datetime import datetime
+from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, Rule, Static
 from textual import work
@@ -19,6 +23,8 @@ from textual import work
 from models.pipeline_state import PipelineState
 from models.video_segment import VideoSegment
 from tui.widgets.pipeline_log import PipelineLog
+
+logger = logging.getLogger(__name__)
 
 
 class SegmentCard(Static):
@@ -132,6 +138,19 @@ class SegmentReviewScreen(Screen):
                 "Manus AI is selecting the best segments from your sermon...",
                 id="screen-subtitle",
             )
+            with Horizontal(id="manus-choice-row"):
+                yield Button(
+                    "Use Previous Manus Response",
+                    id="use-existing-manus-button",
+                    variant="success",
+                    disabled=True,
+                )
+                yield Button(
+                    "Request New Analysis",
+                    id="new-manus-button",
+                    variant="warning",
+                    disabled=True,
+                )
             yield PipelineLog(id="selection-log")
             yield Rule()
             yield ScrollableContainer(id="segments-scroll-container")
@@ -151,7 +170,18 @@ class SegmentReviewScreen(Screen):
             self._display_segments(self._pipeline_state.selected_segments)
             if self._pipeline_state.auto_segment_review:
                 self._proceed_to_cutting_screen()
+            return
+
+        # Check for existing Manus response JSON
+        existing_response_path = self._find_existing_manus_response()
+        if existing_response_path:
+            self._log_widget.write_info(f"Found previous Manus response: {existing_response_path.name}")
+            self.query_one("#use-existing-manus-button", Button).disabled = False
+            self.query_one("#new-manus-button", Button).disabled = False
+            self._existing_manus_response_path = existing_response_path
         else:
+            self.query_one("#use-existing-manus-button", Button).display = False
+            self.query_one("#new-manus-button", Button).display = False
             self._run_segment_selection()
 
     @work(thread=True)
@@ -204,6 +234,9 @@ class SegmentReviewScreen(Screen):
                 task_title=audio_filename,
             )
 
+            # Save Manus response to JSON for reuse
+            self._save_manus_response(manus_response)
+
             segments = parse_segments_from_manus_response(manus_response, all_subtitles)
             self._pipeline_state.selected_segments = segments
 
@@ -235,8 +268,63 @@ class SegmentReviewScreen(Screen):
         self.query_one("#cut-videos-button", Button).disabled = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cut-videos-button":
+        if event.button.id == "use-existing-manus-button":
+            self.query_one("#use-existing-manus-button", Button).disabled = True
+            self.query_one("#new-manus-button", Button).disabled = True
+            self._load_existing_manus_response()
+        elif event.button.id == "new-manus-button":
+            self.query_one("#use-existing-manus-button", Button).disabled = True
+            self.query_one("#new-manus-button", Button).disabled = True
+            self._run_segment_selection()
+        elif event.button.id == "cut-videos-button":
             self._proceed_to_cutting_screen()
+
+    def _find_existing_manus_response(self) -> Path | None:
+        """Look for saved Manus response JSON next to the video file."""
+        if not self._pipeline_state.video_file_path:
+            return None
+        video_directory = self._pipeline_state.video_file_path.parent
+        matching_files = sorted(
+            video_directory.glob("manus_response_*.json"),
+            reverse=True,
+        )
+        return matching_files[0] if matching_files else None
+
+    def _save_manus_response(self, response_text: str) -> None:
+        """Save Manus raw response to JSON file for reuse."""
+        if not self._pipeline_state.video_file_path:
+            return
+        video_directory = self._pipeline_state.video_file_path.parent
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = video_directory / f"manus_response_{timestamp}.json"
+        output_path.write_text(response_text, encoding="utf-8", errors="replace")
+        logger.info(f"Manus response saved: {output_path}")
+
+    @work(thread=True)
+    def _load_existing_manus_response(self) -> None:
+        """Load segments from a previously saved Manus response."""
+        from pipeline.segment_selector import parse_segments_from_manus_response
+        from pipeline.subtitle_parser import load_subtitle_file
+
+        log = self._log_widget
+        response_path = self._existing_manus_response_path
+
+        try:
+            self.app.call_from_thread(log.write_info, f"Loading: {response_path.name}")
+            response_text = response_path.read_text(encoding="utf-8")
+
+            all_subtitles = load_subtitle_file(self._pipeline_state.subtitle_file_path)
+            segments = parse_segments_from_manus_response(response_text, all_subtitles)
+            self._pipeline_state.selected_segments = segments
+
+            self.app.call_from_thread(
+                log.write_success,
+                f"Loaded {len(segments)} segments from previous response",
+            )
+            self.app.call_from_thread(self._display_segments, segments)
+
+        except Exception as error:
+            self.app.call_from_thread(log.write_error, f"Failed to load: {error}")
 
     def _proceed_to_cutting_screen(self) -> None:
         from tui.screens.cutting_screen import CuttingScreen

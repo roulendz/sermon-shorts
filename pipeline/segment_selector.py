@@ -22,8 +22,8 @@ from models.video_segment import VideoSegment
 
 logger = logging.getLogger(__name__)
 
-MINIMUM_CLIPS = 3
-MAXIMUM_CLIPS = 7
+MINIMUM_CLIPS = 5
+MAXIMUM_CLIPS = 14
 
 SEGMENT_SELECTION_PROMPT_TEMPLATE = """\
 You are a world-class video content strategist and editor specializing in \
@@ -35,7 +35,7 @@ Read the ENTIRE SRT transcript below and identify the {minimum_clips} to \
 {maximum_clips} most viral-worthy segments.
 
 STRICT RULES:
-1. Each clip must be between 25 and 60 seconds long
+1. Each clip must be between 60 and 120 seconds long
 2. Return timestamps in ABSOLUTE SECONDS as a float (e.g. 95.350), \
 derived from the SRT timestamps in the file
 3. Start 0.2-0.5 seconds before a strong hook word
@@ -43,6 +43,14 @@ derived from the SRT timestamps in the file
 5. Each clip must be a complete, self-contained thought — never cut mid-sentence
 6. Segments must NOT overlap
 7. Do not select generic intros, outros, or announcements
+8. The transcript is bilingual — [RU] lines are Russian (pastor), [LV] lines \
+are Latvian (translator). Both languages are present in the video.
+
+GRAMMAR CORRECTION — for each selected clip:
+- Review both [RU] and [LV] text within the clip's time range
+- Fix any transcription grammar errors, misspellings, or awkward phrasing
+- Provide corrected text for both languages in the output
+- The transcript was auto-generated, so expect minor errors
 
 SCORING — rate each segment 0-10:
 - hook_power: Does the opening grab attention and stop scrolling immediately?
@@ -72,7 +80,9 @@ Respond with ONLY valid JSON — no markdown fences, no explanation, nothing els
         "shareability_score": <int 0-10>,
         "overall_viral_score": <float>
       }},
-      "reason_for_selection": "<one sentence expert analysis>"
+      "reason_for_selection": "<one sentence expert analysis>",
+      "corrected_text_ru": "<grammar-corrected Russian text for this clip>",
+      "corrected_text_lv": "<grammar-corrected Latvian text for this clip>"
     }}
   ]
 }}
@@ -110,9 +120,17 @@ def parse_segments_from_manus_response(
         start_time = convert_seconds_float_to_timedelta(raw_clip["start_time"])
         end_time = convert_seconds_float_to_timedelta(raw_clip["end_time"])
 
-        transcript_text = extract_transcript_text_for_window(
-            all_subtitles, start_time, end_time
-        )
+        # Use Manus corrected text if available, otherwise extract from subtitles
+        corrected_ru = raw_clip.get("corrected_text_ru", "")
+        corrected_lv = raw_clip.get("corrected_text_lv", "")
+        if corrected_ru or corrected_lv:
+            transcript_text = f"{corrected_ru}\n{corrected_lv}".strip()
+        else:
+            transcript_text = extract_transcript_text_for_window(
+                all_subtitles, start_time, end_time
+            )
+        if not transcript_text:
+            transcript_text = raw_clip.get("reason_for_selection", f"Segment {raw_clip['index']}")
 
         scoring = raw_clip.get("scoring_analysis", {})
 

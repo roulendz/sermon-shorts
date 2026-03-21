@@ -120,12 +120,12 @@ def merge_bilingual_subtitles(
         if start_time < timedelta(0):
             continue
 
-        tagged_text = f"[{entry['language_tag']}] {entry['text']}"
+        subtitle_text = entry["text"]
         subtitles.append(srt.Subtitle(
             index=index,
             start=start_time,
             end=end_time,
-            content=tagged_text,
+            content=subtitle_text,
         ))
 
     # Reindex after filtering
