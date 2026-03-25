@@ -165,9 +165,12 @@ def test_map_words_to_speech_regions_basic():
 
     assert len(subtitles) == 2
     assert subtitles[0].content == "[RU] Privet mir"
-    assert subtitles[0].start == timedelta(seconds=10.2)
-    assert subtitles[0].end == timedelta(seconds=11.5)
+    # Uses REGION boundaries for timing, not word timestamps
+    assert subtitles[0].start == timedelta(seconds=10.0)
+    assert subtitles[0].end == timedelta(seconds=15.0)
     assert subtitles[1].content == "[RU] Kak dela"
+    assert subtitles[1].start == timedelta(seconds=25.0)
+    assert subtitles[1].end == timedelta(seconds=30.0)
 
 
 def test_map_words_to_speech_regions_skips_empty_regions():

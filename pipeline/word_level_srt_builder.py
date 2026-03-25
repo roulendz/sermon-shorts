@@ -212,51 +212,35 @@ def map_words_to_speech_regions(
     language_tag: str,
 ) -> list[srt.Subtitle]:
     """
-    Map individual WhisperX words into speech regions. Each speech region
-    becomes one subtitle entry containing all words whose midpoint falls
-    within that region. Uses the region boundaries for subtitle timing
-    and the first/last word timestamps for precise start/end.
+    Map individual WhisperX words into speech region slots. Each speech
+    region becomes one subtitle entry. Words are placed into a region
+    when their start timestamp falls within it.
 
-    This is the correct approach: speech regions define WHEN each speaker
-    talks, words define WHAT was said. Regions with no words are skipped.
+    Uses REGION boundaries for subtitle timing (not word timestamps).
+    This guarantees zero overlaps since cleaned speech regions are
+    non-overlapping after mic-bleed removal and RU-priority alignment.
+
+    Regions with no words are skipped (silence or mic bleed).
     """
-    # For each region, collect words that fall within it
-    region_words: dict[int, list[dict]] = {}
-
-    for word in words:
-        word_midpoint = (word["start"] + word["end"]) / 2.0
-
-        for region_index, (region_start, region_end) in enumerate(speech_regions):
-            if region_start <= word_midpoint <= region_end:
-                if region_index not in region_words:
-                    region_words[region_index] = []
-                region_words[region_index].append(word)
-                break
-
-    # Build subtitle entries from regions that have words
     subtitles: list[srt.Subtitle] = []
 
-    for region_index, (region_start, region_end) in enumerate(speech_regions):
-        if region_index not in region_words:
-            continue
+    for region_start, region_end in speech_regions:
+        region_text_parts: list[str] = []
 
-        collected_words = region_words[region_index]
-        text = " ".join(
-            word_entry.get("word", "") for word_entry in collected_words
-        ).strip()
+        for word in words:
+            word_start = word["start"]
+            if region_start <= word_start <= region_end:
+                region_text_parts.append(word.get("word", ""))
 
+        text = " ".join(region_text_parts).strip()
         if not text:
             continue
-
-        # Use word-level timestamps for precise boundaries
-        first_word_start = collected_words[0]["start"]
-        last_word_end = collected_words[-1]["end"]
 
         subtitles.append(
             srt.Subtitle(
                 index=0,
-                start=timedelta(seconds=first_word_start),
-                end=timedelta(seconds=last_word_end),
+                start=timedelta(seconds=region_start),
+                end=timedelta(seconds=region_end),
                 content=f"[{language_tag}] {text}",
             )
         )
