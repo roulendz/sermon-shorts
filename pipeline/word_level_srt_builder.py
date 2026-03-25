@@ -123,7 +123,7 @@ def build_cleaned_speech_regions(
     primary_audio_path: Path,
     secondary_audio_path: Path,
     offset_seconds: float = 0.0,
-    noise_threshold_db: int = -25,
+    noise_threshold_db: int = -45,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """
@@ -142,13 +142,14 @@ def build_cleaned_speech_regions(
     from pipeline.bilingual_subtitle_merger import (
         _remove_mic_bleed,
         _align_secondary_to_primary,
+        _split_overlaps_at_midpoint,
     )
 
     def _log(message: str) -> None:
         if on_progress:
             on_progress(message)
 
-    # Primary (RU) speech regions
+    # Primary (RU) speech regions — same params as PNG algorithm
     primary_duration = get_audio_duration_seconds(str(primary_audio_path))
     primary_silences = detect_silence_regions(
         str(primary_audio_path), noise_threshold_db, on_progress=on_progress,
@@ -173,6 +174,12 @@ def build_cleaned_speech_regions(
     # Align secondary to primary (trim LV when RU is talking)
     secondary_speech = _align_secondary_to_primary(primary_speech, secondary_speech)
     _log(f"Secondary after RU-priority alignment: {len(secondary_speech)} regions")
+
+    # Split remaining overlaps at midpoint — seamless handoffs, no gaps
+    primary_speech, secondary_speech = _split_overlaps_at_midpoint(
+        primary_speech, secondary_speech,
+    )
+    _log(f"After split overlaps: primary={len(primary_speech)}, secondary={len(secondary_speech)}")
 
     # Apply video offset
     primary_speech_offset = [
