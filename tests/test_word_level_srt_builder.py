@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pipeline.word_level_srt_builder import (
     build_word_level_subtitles,
+    extract_words_from_response,
+    map_words_to_speech_regions,
     merge_bilingual_word_level_srt,
     save_word_level_srt,
 )
@@ -150,57 +152,97 @@ def test_build_word_level_subtitles_handles_list_response():
     assert len(subtitles) == 1
 
 
+def test_map_words_to_speech_regions_basic():
+    words = [
+        {"word": "Privet", "start": 10.2, "end": 10.8},
+        {"word": "mir", "start": 11.0, "end": 11.5},
+        {"word": "Kak", "start": 25.1, "end": 25.5},
+        {"word": "dela", "start": 25.6, "end": 26.0},
+    ]
+    speech_regions = [(10.0, 15.0), (25.0, 30.0)]
+
+    subtitles = map_words_to_speech_regions(words, speech_regions, "RU")
+
+    assert len(subtitles) == 2
+    assert subtitles[0].content == "[RU] Privet mir"
+    assert subtitles[0].start == timedelta(seconds=10.2)
+    assert subtitles[0].end == timedelta(seconds=11.5)
+    assert subtitles[1].content == "[RU] Kak dela"
+
+
+def test_map_words_to_speech_regions_skips_empty_regions():
+    words = [
+        {"word": "Hello", "start": 10.5, "end": 11.0},
+    ]
+    speech_regions = [(5.0, 8.0), (10.0, 15.0)]
+
+    subtitles = map_words_to_speech_regions(words, speech_regions, "LV")
+
+    assert len(subtitles) == 1
+    assert subtitles[0].content == "[LV] Hello"
+
+
 def test_merge_bilingual_word_level_srt_interleaves_by_timestamp():
-    ru_response = {
-        "segments": [
-            {"start": 10.0, "end": 15.0, "text": "Privet mir"},
-            {"start": 25.0, "end": 30.0, "text": "Eto test"},
-        ]
-    }
-    lv_response = {
-        "segments": [
-            {"start": 16.0, "end": 22.0, "text": "Sveika pasaule"},
-            {"start": 31.0, "end": 36.0, "text": "Tas ir tests"},
-        ]
-    }
+    ru_words = [
+        {"word": "Privet", "start": 10.2, "end": 10.8},
+        {"word": "Eto", "start": 25.1, "end": 25.5},
+    ]
+    lv_words = [
+        {"word": "Sveiki", "start": 16.1, "end": 16.8},
+        {"word": "Tests", "start": 31.1, "end": 31.5},
+    ]
+    ru_regions = [(10.0, 15.0), (25.0, 30.0)]
+    lv_regions = [(16.0, 22.0), (31.0, 36.0)]
 
-    ru_subtitles = build_word_level_subtitles(ru_response)
-    lv_subtitles = build_word_level_subtitles(lv_response)
+    ru_subs = map_words_to_speech_regions(ru_words, ru_regions, "RU")
+    lv_subs = map_words_to_speech_regions(lv_words, lv_regions, "LV")
 
-    merged = merge_bilingual_word_level_srt(
-        primary_subtitles=ru_subtitles,
-        primary_language_tag="RU",
-        secondary_subtitles=lv_subtitles,
-        secondary_language_tag="LV",
-    )
+    merged = merge_bilingual_word_level_srt(ru_subs, lv_subs)
 
     assert len(merged) == 4
-    # Should be sorted by time: RU(10), LV(16), RU(25), LV(31)
-    assert merged[0].content == "[RU] Privet mir"
-    assert merged[1].content == "[LV] Sveika pasaule"
-    assert merged[2].content == "[RU] Eto test"
-    assert merged[3].content == "[LV] Tas ir tests"
-    # Indexes should be sequential
+    assert merged[0].content == "[RU] Privet"
+    assert merged[1].content == "[LV] Sveiki"
+    assert merged[2].content == "[RU] Eto"
+    assert merged[3].content == "[LV] Tests"
     assert [subtitle.index for subtitle in merged] == [1, 2, 3, 4]
 
 
 def test_merge_bilingual_word_level_srt_handles_single_language():
-    response = {
-        "segments": [
-            {"start": 5.0, "end": 10.0, "text": "Only one language"},
-        ]
-    }
-    subtitles = build_word_level_subtitles(response)
+    words = [{"word": "Only", "start": 5.5, "end": 6.0}]
+    regions = [(5.0, 10.0)]
 
-    merged = merge_bilingual_word_level_srt(
-        primary_subtitles=subtitles,
-        primary_language_tag="LV",
-        secondary_subtitles=[],
-        secondary_language_tag="RU",
-    )
+    subs = map_words_to_speech_regions(words, regions, "LV")
+    merged = merge_bilingual_word_level_srt(subs, [])
 
     assert len(merged) == 1
-    assert merged[0].content == "[LV] Only one language"
+    assert merged[0].content == "[LV] Only"
+
+
+def test_extract_words_from_response():
+    response = {
+        "segments": [
+            {
+                "text": "Hello world",
+                "words": [
+                    {"word": "Hello", "start": 1.0, "end": 1.5},
+                    {"word": "world", "start": 1.6, "end": 2.0},
+                ],
+            },
+            {
+                "text": "No timestamps",
+                "words": [
+                    {"word": "No"},
+                    {"word": "timestamps"},
+                ],
+            },
+        ]
+    }
+
+    words = extract_words_from_response(response)
+
+    assert len(words) == 2
+    assert words[0]["word"] == "Hello"
+    assert words[1]["word"] == "world"
 
 
 def test_save_word_level_srt_creates_file(tmp_path):

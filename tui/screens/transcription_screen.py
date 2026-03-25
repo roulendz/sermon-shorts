@@ -161,7 +161,8 @@ class TranscriptionScreen(Screen):
         from pipeline.word_level_srt_builder import (
             build_cleaned_speech_regions,
             build_word_level_subtitles,
-            filter_subtitles_to_speech_regions,
+            extract_words_from_response,
+            map_words_to_speech_regions,
             merge_bilingual_word_level_srt,
             save_word_level_srt,
         )
@@ -211,7 +212,7 @@ class TranscriptionScreen(Screen):
             )
 
             primary_subtitle_file_path = None
-            subtitles_by_language: dict[str, list] = {}
+            responses_by_language: dict[str, dict] = {}
 
             for language_code, audio_file_path in discovered_tracks.items():
                 self.app.call_from_thread(
@@ -244,9 +245,9 @@ class TranscriptionScreen(Screen):
                     f"Response saved: {json_path.name}",
                 )
 
-                # 4. Build word-level SRT
+                # 4. Build word-level SRT (single-language)
                 subtitles = build_word_level_subtitles(raw_response)
-                subtitles_by_language[language_code] = subtitles
+                responses_by_language[language_code] = raw_response
 
                 srt_output_path = version_directory / f"{audio_file_path.stem}_wordlevel.srt"
                 save_word_level_srt(subtitles, srt_output_path)
@@ -274,43 +275,36 @@ class TranscriptionScreen(Screen):
                 )
 
             # 6. Merge bilingual SRT if both LV and RU are available
-            if "lv" in subtitles_by_language and "ru" in subtitles_by_language:
+            if "lv" in responses_by_language and "ru" in responses_by_language:
                 self.app.call_from_thread(
                     log.write_step_header,
-                    "Filtering mic bleed + RU-priority alignment",
+                    "Building bilingual SRT (speech regions + word mapping)",
                 )
 
                 from pipeline.audio_compressor import DEFAULT_AUDIO_OFFSET_SECONDS
 
-                ru_speech_offset, lv_speech_offset = build_cleaned_speech_regions(
+                ru_speech, lv_speech = build_cleaned_speech_regions(
                     primary_audio_path=discovered_tracks["ru"],
                     secondary_audio_path=discovered_tracks["lv"],
                     offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS,
                     on_progress=on_progress,
                 )
 
-                ru_filtered = filter_subtitles_to_speech_regions(
-                    subtitles_by_language["ru"], ru_speech_offset,
-                )
-                lv_filtered = filter_subtitles_to_speech_regions(
-                    subtitles_by_language["lv"], lv_speech_offset,
-                )
+                ru_words = extract_words_from_response(responses_by_language["ru"])
+                lv_words = extract_words_from_response(responses_by_language["lv"])
+
+                ru_subtitles = map_words_to_speech_regions(ru_words, ru_speech, "RU")
+                lv_subtitles = map_words_to_speech_regions(lv_words, lv_speech, "LV")
 
                 self.app.call_from_thread(
                     log.write_info,
-                    f"After filter: RU={len(ru_filtered)}, LV={len(lv_filtered)}",
+                    f"Mapped: RU={len(ru_subtitles)} subs, LV={len(lv_subtitles)} subs",
                 )
 
-                self.app.call_from_thread(
-                    log.write_step_header,
-                    "Merging bilingual SRT (RU + LV)",
-                )
                 merged_subtitles = merge_bilingual_word_level_srt(
-                    primary_subtitles=ru_filtered,
-                    primary_language_tag="RU",
-                    secondary_subtitles=lv_filtered,
-                    secondary_language_tag="LV",
+                    ru_subtitles, lv_subtitles,
                 )
+
                 video_stem = self._pipeline_state.video_file_path.stem
                 merged_srt_path = version_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 save_word_level_srt(merged_subtitles, merged_srt_path)
@@ -327,7 +321,6 @@ class TranscriptionScreen(Screen):
                     log.write_success,
                     f"Bilingual SRT: {merged_srt_path.name} ({len(merged_subtitles)} entries)",
                 )
-                # Use bilingual as primary for downstream
                 primary_subtitle_file_path = merged_compatibility_path
 
             self._pipeline_state.subtitle_file_path = primary_subtitle_file_path
@@ -353,7 +346,8 @@ class TranscriptionScreen(Screen):
         from pipeline.word_level_srt_builder import (
             build_cleaned_speech_regions,
             build_word_level_subtitles,
-            filter_subtitles_to_speech_regions,
+            extract_words_from_response,
+            map_words_to_speech_regions,
             merge_bilingual_word_level_srt,
             save_word_level_srt,
         )
@@ -390,7 +384,7 @@ class TranscriptionScreen(Screen):
             )
 
             primary_subtitle_file_path = None
-            subtitles_by_language: dict[str, list] = {}
+            responses_by_language: dict[str, dict] = {}
 
             for audio_stem in stored_stems:
                 response_data = load_whisperx_response(
@@ -399,27 +393,20 @@ class TranscriptionScreen(Screen):
                     version_number,
                 )
 
-                # Build word-level SRT (or use cached)
+                # Build single-language word-level SRT
+                subtitles = build_word_level_subtitles(response_data)
                 srt_path = version_directory / f"{audio_stem}_wordlevel.srt"
-                if not srt_path.exists():
-                    subtitles = build_word_level_subtitles(response_data)
-                    save_word_level_srt(subtitles, srt_path)
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"Built word-level SRT: {srt_path.name}",
-                    )
-                else:
-                    subtitles = build_word_level_subtitles(response_data)
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"Using cached SRT: {srt_path.name}",
-                    )
+                save_word_level_srt(subtitles, srt_path)
+                self.app.call_from_thread(
+                    log.write_info,
+                    f"Word-level SRT: {srt_path.name} ({len(subtitles)} entries)",
+                )
 
-                # Track subtitles by language for bilingual merge
+                # Track responses by language for bilingual merge
                 if "_A03" in audio_stem:
-                    subtitles_by_language["lv"] = subtitles
+                    responses_by_language["lv"] = response_data
                 elif "_A04" in audio_stem:
-                    subtitles_by_language["ru"] = subtitles
+                    responses_by_language["ru"] = response_data
 
                 # Copy to transcriptions/ for downstream compatibility
                 transcriptions_directory = (
@@ -428,18 +415,17 @@ class TranscriptionScreen(Screen):
                 compatibility_srt_path = (
                     transcriptions_directory / f"{audio_stem}_wordlevel.srt"
                 )
-                if not compatibility_srt_path.exists():
-                    save_word_level_srt(subtitles, compatibility_srt_path)
+                save_word_level_srt(subtitles, compatibility_srt_path)
 
                 # LV (_A03) is the primary track for downstream
                 if "_A03" in audio_stem or primary_subtitle_file_path is None:
                     primary_subtitle_file_path = compatibility_srt_path
 
             # Merge bilingual SRT if both LV and RU are available
-            if "lv" in subtitles_by_language and "ru" in subtitles_by_language:
+            if "lv" in responses_by_language and "ru" in responses_by_language:
                 self.app.call_from_thread(
                     log.write_step_header,
-                    "Filtering mic bleed + RU-priority alignment",
+                    "Building bilingual SRT (speech regions + word mapping)",
                 )
 
                 discovered_tracks = self._pipeline_state.discovered_audio_tracks
@@ -449,35 +435,28 @@ class TranscriptionScreen(Screen):
 
                 from pipeline.audio_compressor import DEFAULT_AUDIO_OFFSET_SECONDS
 
-                ru_speech_offset, lv_speech_offset = build_cleaned_speech_regions(
+                ru_speech, lv_speech = build_cleaned_speech_regions(
                     primary_audio_path=discovered_tracks["ru"],
                     secondary_audio_path=discovered_tracks["lv"],
                     offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS,
                     on_progress=on_progress,
                 )
 
-                subtitles_by_language["ru"] = filter_subtitles_to_speech_regions(
-                    subtitles_by_language["ru"], ru_speech_offset,
-                )
-                subtitles_by_language["lv"] = filter_subtitles_to_speech_regions(
-                    subtitles_by_language["lv"], lv_speech_offset,
-                )
+                ru_words = extract_words_from_response(responses_by_language["ru"])
+                lv_words = extract_words_from_response(responses_by_language["lv"])
+
+                ru_subtitles = map_words_to_speech_regions(ru_words, ru_speech, "RU")
+                lv_subtitles = map_words_to_speech_regions(lv_words, lv_speech, "LV")
 
                 self.app.call_from_thread(
                     log.write_info,
-                    f"After filter: RU={len(subtitles_by_language['ru'])}, LV={len(subtitles_by_language['lv'])}",
+                    f"Mapped: RU={len(ru_subtitles)} subs, LV={len(lv_subtitles)} subs",
                 )
 
-                self.app.call_from_thread(
-                    log.write_step_header,
-                    "Merging bilingual SRT (RU + LV)",
-                )
                 merged_subtitles = merge_bilingual_word_level_srt(
-                    primary_subtitles=subtitles_by_language["ru"],
-                    primary_language_tag="RU",
-                    secondary_subtitles=subtitles_by_language["lv"],
-                    secondary_language_tag="LV",
+                    ru_subtitles, lv_subtitles,
                 )
+
                 video_stem = self._pipeline_state.video_file_path.stem
                 merged_srt_path = version_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 save_word_level_srt(merged_subtitles, merged_srt_path)

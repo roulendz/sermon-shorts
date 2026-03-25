@@ -4,6 +4,10 @@ pipeline/word_level_srt_builder.py
 Builds SRT subtitle files from WhisperX word-level timestamp data.
 Uses word-level start/end times for precise subtitle boundaries
 while keeping segment text as complete sentences.
+
+For bilingual merge: maps individual WhisperX words into speech regions
+detected by silence analysis, then builds one subtitle per region.
+This ensures clean RU-LV alternation without overlap.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import srt
 
@@ -181,80 +185,110 @@ def build_cleaned_speech_regions(
     return primary_speech_offset, secondary_speech_offset
 
 
-def filter_subtitles_to_speech_regions(
-    subtitles: list[srt.Subtitle],
+def extract_words_from_response(
+    whisperx_response: dict[str, Any],
+) -> list[dict]:
+    """
+    Extract all individual words with timestamps from a WhisperX response.
+    Returns a flat list of word dicts, each with 'word', 'start', 'end'.
+    Words without timestamps are skipped.
+    """
+    segments = _extract_segments_from_response(whisperx_response)
+    all_words: list[dict] = []
+
+    for segment in segments:
+        words = segment.get("words", [])
+        for word in words:
+            if word.get("start") is not None and word.get("end") is not None:
+                all_words.append(word)
+
+    logger.info(f"Extracted {len(all_words)} timestamped words from WhisperX response")
+    return all_words
+
+
+def map_words_to_speech_regions(
+    words: list[dict],
     speech_regions: list[tuple[float, float]],
+    language_tag: str,
 ) -> list[srt.Subtitle]:
     """
-    Keep only subtitles whose midpoint falls within a speech region.
-    This removes mic-bleed subtitles that WhisperX transcribed from
-    the wrong speaker's audio leaking into a track.
+    Map individual WhisperX words into speech regions. Each speech region
+    becomes one subtitle entry containing all words whose midpoint falls
+    within that region. Uses the region boundaries for subtitle timing
+    and the first/last word timestamps for precise start/end.
+
+    This is the correct approach: speech regions define WHEN each speaker
+    talks, words define WHAT was said. Regions with no words are skipped.
     """
-    filtered: list[srt.Subtitle] = []
+    # For each region, collect words that fall within it
+    region_words: dict[int, list[dict]] = {}
 
-    for subtitle in subtitles:
-        midpoint_seconds = (
-            subtitle.start.total_seconds() + subtitle.end.total_seconds()
-        ) / 2.0
+    for word in words:
+        word_midpoint = (word["start"] + word["end"]) / 2.0
 
-        for region_start, region_end in speech_regions:
-            if region_start <= midpoint_seconds <= region_end:
-                filtered.append(subtitle)
+        for region_index, (region_start, region_end) in enumerate(speech_regions):
+            if region_start <= word_midpoint <= region_end:
+                if region_index not in region_words:
+                    region_words[region_index] = []
+                region_words[region_index].append(word)
                 break
 
+    # Build subtitle entries from regions that have words
+    subtitles: list[srt.Subtitle] = []
+
+    for region_index, (region_start, region_end) in enumerate(speech_regions):
+        if region_index not in region_words:
+            continue
+
+        collected_words = region_words[region_index]
+        text = " ".join(
+            word_entry.get("word", "") for word_entry in collected_words
+        ).strip()
+
+        if not text:
+            continue
+
+        # Use word-level timestamps for precise boundaries
+        first_word_start = collected_words[0]["start"]
+        last_word_end = collected_words[-1]["end"]
+
+        subtitles.append(
+            srt.Subtitle(
+                index=0,
+                start=timedelta(seconds=first_word_start),
+                end=timedelta(seconds=last_word_end),
+                content=f"[{language_tag}] {text}",
+            )
+        )
+
     logger.info(
-        f"Filtered subtitles by speech regions: {len(subtitles)} -> {len(filtered)} "
-        f"({len(subtitles) - len(filtered)} bleed entries removed)"
+        f"Mapped {len(words)} words into {len(subtitles)} subtitles "
+        f"across {len(speech_regions)} speech regions [{language_tag}]"
     )
-    return filtered
+    return subtitles
 
 
 def merge_bilingual_word_level_srt(
     primary_subtitles: list[srt.Subtitle],
-    primary_language_tag: str,
     secondary_subtitles: list[srt.Subtitle],
-    secondary_language_tag: str,
 ) -> list[srt.Subtitle]:
     """
-    Merge two single-language word-level subtitle tracks into one bilingual
-    SRT sorted by timestamp with [LV]/[RU] language tags prepended.
-
-    Subtitles should already be filtered by speech regions before calling
-    this function to avoid showing both languages simultaneously.
+    Merge two pre-tagged subtitle tracks into one bilingual SRT sorted
+    by timestamp. Subtitles must already have [RU]/[LV] tags and be
+    mapped to non-overlapping speech regions.
     """
-    tagged_entries: list[srt.Subtitle] = []
+    all_entries = primary_subtitles + secondary_subtitles
+    all_entries.sort(key=lambda subtitle: subtitle.start)
 
-    for subtitle in primary_subtitles:
-        tagged_entries.append(
-            srt.Subtitle(
-                index=0,
-                start=subtitle.start,
-                end=subtitle.end,
-                content=f"[{primary_language_tag}] {subtitle.content}",
-            )
-        )
-
-    for subtitle in secondary_subtitles:
-        tagged_entries.append(
-            srt.Subtitle(
-                index=0,
-                start=subtitle.start,
-                end=subtitle.end,
-                content=f"[{secondary_language_tag}] {subtitle.content}",
-            )
-        )
-
-    tagged_entries.sort(key=lambda subtitle: subtitle.start)
-
-    for new_index, subtitle in enumerate(tagged_entries, start=1):
+    for new_index, subtitle in enumerate(all_entries, start=1):
         subtitle.index = new_index
 
     logger.info(
-        f"Merged bilingual SRT: {len(primary_subtitles)} {primary_language_tag} "
-        f"+ {len(secondary_subtitles)} {secondary_language_tag} "
-        f"= {len(tagged_entries)} total entries"
+        f"Merged bilingual SRT: {len(primary_subtitles)} primary "
+        f"+ {len(secondary_subtitles)} secondary "
+        f"= {len(all_entries)} total entries"
     )
-    return tagged_entries
+    return all_entries
 
 
 def _find_last_valid_word_end(words: list[dict]) -> float | None:
