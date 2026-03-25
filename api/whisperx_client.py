@@ -48,6 +48,20 @@ class WhisperXClient:
         task_id = self._upload_via_tus(audio_file_path, language_code, on_progress)
         return self._poll_until_complete(task_id, on_progress)
 
+    def transcribe_audio_file_raw(
+        self,
+        audio_file_path: Path,
+        language_code: str = "lv",
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        """
+        Upload audio via TUS chunked protocol (auto-triggers transcription),
+        then poll until complete. Returns the full result dict including
+        word-level data (segments[].words[]).
+        """
+        task_id = self._upload_via_tus(audio_file_path, language_code, on_progress)
+        return self._poll_until_complete_raw(task_id, on_progress)
+
     def _upload_via_tus(
         self,
         audio_file_path: Path,
@@ -158,11 +172,12 @@ class WhisperXClient:
 
         raise WhisperXTranscriptionError("No tasks found after upload")
 
-    def _poll_until_complete(
+    def _poll_until_complete_raw(
         self,
         task_id: str,
         on_progress: Optional[Callable[[str], None]] = None,
-    ) -> str:
+    ) -> dict:
+        """Poll until task completes, return the full result dict."""
         def _log(msg: str) -> None:
             logger.info(msg)
             if on_progress:
@@ -184,10 +199,10 @@ class WhisperXClient:
                     timeout=REQUEST_TIMEOUT_SECONDS,
                 )
                 if progress_resp.status_code == 200:
-                    pd = progress_resp.json()
-                    pct = pd.get("progress_percentage", "?")
-                    stage = pd.get("progress_stage", "")
-                    _log(f"Progress: {pct}% -- {stage} ({elapsed_seconds}s elapsed, {remaining}s left)")
+                    progress_data = progress_resp.json()
+                    percentage = progress_data.get("progress_percentage", "?")
+                    stage = progress_data.get("progress_stage", "")
+                    _log(f"Progress: {percentage}% -- {stage} ({elapsed_seconds}s elapsed, {remaining}s left)")
             except Exception:
                 _log(f"Polling... ({elapsed_seconds}s elapsed, {remaining}s left)")
 
@@ -200,8 +215,8 @@ class WhisperXClient:
                 )
                 task_resp.raise_for_status()
                 task_data = task_resp.json()
-            except httpx.HTTPError as e:
-                _log(f"Poll error: {e}")
+            except httpx.HTTPError as error:
+                _log(f"Poll error: {error}")
                 continue
 
             task_status = str(task_data.get("status", "")).lower()
@@ -213,7 +228,7 @@ class WhisperXClient:
                         f"Task completed but no result: {task_data}"
                     )
                 _log(f"Transcription complete ({elapsed_seconds}s)")
-                return self._result_to_srt(result)
+                return result
 
             if task_status in ("failed", "error"):
                 error_msg = task_data.get("error", "Unknown error")
@@ -222,6 +237,15 @@ class WhisperXClient:
         raise WhisperXTranscriptionError(
             f"Task {task_id} did not complete within {MAX_POLLING_WAIT_SECONDS}s"
         )
+
+    def _poll_until_complete(
+        self,
+        task_id: str,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Poll until task completes, return SRT text (backward compatible)."""
+        result = self._poll_until_complete_raw(task_id, on_progress)
+        return self._result_to_srt(result)
 
     @staticmethod
     def _result_to_srt(result) -> str:

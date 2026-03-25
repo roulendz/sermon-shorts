@@ -224,14 +224,14 @@ class SegmentReviewScreen(Screen):
                 self.app.call_from_thread(log.write_info, msg)
 
             manus_project_id = os.getenv("MANUS_PROJECT_ID", "")
-            audio_filename = self._pipeline_state.audio_file_path.stem if self._pipeline_state.audio_file_path else None
+            video_filename = self._pipeline_state.video_file_path.stem if self._pipeline_state.video_file_path else None
 
             client = ManusClient(api_key=manus_api_key)
             manus_response = client.submit_prompt_and_wait_for_response(
                 prompt,
                 on_progress=on_progress,
                 project_id=manus_project_id or None,
-                task_title=audio_filename,
+                task_title=video_filename,
             )
 
             # Save Manus response to JSON for reuse
