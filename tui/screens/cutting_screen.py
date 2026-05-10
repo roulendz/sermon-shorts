@@ -117,6 +117,7 @@ class CuttingScreen(Screen):
     @work(thread=True)
     def _run_segment_cutting(self) -> None:
         from pipeline.subtitle_parser import (
+            find_end_of_preceding_subtitle,
             load_subtitle_file,
             slice_subtitles_within_window,
             save_subtitles_to_file,
@@ -146,6 +147,19 @@ class CuttingScreen(Screen):
 
         for segment in segments:
             try:
+                preceding_subtitle_end = find_end_of_preceding_subtitle(
+                    all_subtitles, segment.start_time,
+                )
+                if preceding_subtitle_end is not None and preceding_subtitle_end != segment.start_time:
+                    original_start_timestamp = segment.ffmpeg_start_timestamp
+                    segment.start_time = preceding_subtitle_end
+                    self.app.call_from_thread(
+                        log.write_info,
+                        f"Segment {segment.index}: snapped start "
+                        f"{original_start_timestamp} → {segment.ffmpeg_start_timestamp} "
+                        f"(aligned to preceding subtitle boundary)",
+                    )
+
                 self.app.call_from_thread(
                     log.write_info,
                     f"Cutting segment {segment.index}: "

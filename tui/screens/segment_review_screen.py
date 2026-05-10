@@ -115,10 +115,11 @@ class SegmentReviewScreen(Screen):
     }
     #selection-log {
         margin-bottom: 1;
+        height: 1fr;
     }
     #segments-scroll-container {
-        height: 1fr;
-        border: none;
+        height: auto;
+        max-height: 50%;
     }
     #cut-videos-button {
         margin-top: 1;

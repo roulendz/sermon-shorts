@@ -90,6 +90,24 @@ def reindex_and_rebase_subtitles(
     ]
 
 
+def find_end_of_preceding_subtitle(
+    subtitles: Sequence[srt.Subtitle],
+    reference_time: timedelta,
+) -> timedelta | None:
+    """
+    Return the end time of the subtitle immediately before the first subtitle
+    that starts at or after reference_time. In bilingual sermons (RU→LV),
+    the gap between this end time and the next subtitle's start contains
+    the untranscribed language (Russian) audio.
+    """
+    for index, subtitle in enumerate(subtitles):
+        if subtitle.start >= reference_time:
+            if index > 0:
+                return subtitles[index - 1].end
+            return None
+    return None
+
+
 def extract_plain_text_from_subtitles(subtitles: Sequence[srt.Subtitle]) -> str:
     """
     Concatenate all subtitle content into a single readable string.

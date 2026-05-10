@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from pipeline.subtitle_parser import (
+    find_end_of_preceding_subtitle,
     parse_subtitle_text,
     shift_subtitle_timestamps,
     slice_subtitles_within_window,
@@ -176,3 +177,62 @@ def test_save_subtitles_to_file_creates_parent_directories(simple_subtitle_list,
     nested_path = tmp_path / "deeply" / "nested" / "output.srt"
     save_subtitles_to_file(simple_subtitle_list, nested_path)
     assert nested_path.exists()
+
+
+def test_find_end_of_preceding_subtitle_returns_previous_end(simple_subtitle_list):
+    # reference_time in gap between sub 2 (end 1:10) and sub 3 (start 5:00)
+    result = find_end_of_preceding_subtitle(simple_subtitle_list, timedelta(minutes=2))
+    assert result == timedelta(minutes=1, seconds=10)
+
+
+def test_find_end_of_preceding_subtitle_at_exact_start(simple_subtitle_list):
+    # reference_time exactly at sub 3 start (5:00) — should return sub 2 end
+    result = find_end_of_preceding_subtitle(simple_subtitle_list, timedelta(minutes=5))
+    assert result == timedelta(minutes=1, seconds=10)
+
+
+def test_find_end_of_preceding_subtitle_returns_none_for_first(simple_subtitle_list):
+    # reference_time before or at first subtitle — no preceding subtitle
+    result = find_end_of_preceding_subtitle(simple_subtitle_list, timedelta(seconds=30))
+    assert result is None
+
+
+def test_find_end_of_preceding_subtitle_returns_none_for_empty_list():
+    result = find_end_of_preceding_subtitle([], timedelta(minutes=1))
+    assert result is None
+
+
+def test_find_end_of_preceding_subtitle_returns_none_when_all_after():
+    subtitles = [
+        srt.Subtitle(index=1, start=timedelta(minutes=10), end=timedelta(minutes=10, seconds=5), content="Late."),
+    ]
+    result = find_end_of_preceding_subtitle(subtitles, timedelta(minutes=10))
+    assert result is None
+
+
+def test_find_end_of_preceding_subtitle_consecutive_subtitles():
+    # Two consecutive subs with no gap — preceding end equals current start
+    subtitles = [
+        srt.Subtitle(index=1, start=timedelta(seconds=10), end=timedelta(seconds=20), content="A"),
+        srt.Subtitle(index=2, start=timedelta(seconds=20), end=timedelta(seconds=30), content="B"),
+        srt.Subtitle(index=3, start=timedelta(seconds=40), end=timedelta(seconds=50), content="C"),
+    ]
+    result = find_end_of_preceding_subtitle(subtitles, timedelta(seconds=20))
+    assert result == timedelta(seconds=20)
+
+
+def test_find_end_of_preceding_subtitle_reference_inside_subtitle():
+    """When reference_time falls inside a long subtitle, return that subtitle's
+    end — the boundary where untranscribed (Russian) audio begins before
+    the next Latvian subtitle."""
+    subtitles = [
+        srt.Subtitle(index=64, start=timedelta(minutes=10, seconds=52, milliseconds=261),
+                      end=timedelta(minutes=10, seconds=53, milliseconds=761), content="Grib."),
+        srt.Subtitle(index=65, start=timedelta(minutes=10, seconds=56, milliseconds=301),
+                      end=timedelta(minutes=11, seconds=35, milliseconds=482), content="Long Latvian passage."),
+        srt.Subtitle(index=66, start=timedelta(minutes=11, seconds=37, milliseconds=202),
+                      end=timedelta(minutes=11, seconds=38, milliseconds=42), content="Jūs sakot man?"),
+    ]
+    reference_time = timedelta(minutes=11, seconds=20, milliseconds=872)
+    result = find_end_of_preceding_subtitle(subtitles, reference_time)
+    assert result == timedelta(minutes=11, seconds=35, milliseconds=482)
