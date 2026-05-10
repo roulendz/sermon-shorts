@@ -85,6 +85,7 @@ def transcribe_with_transkriptor_and_save_aligned_subtitles(
     transkriptor_client: TranskriptorClient,
     audio_to_video_offset_seconds: float,
     language_locale: str = "lv-LV",
+    display_file_name: Optional[str] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """
@@ -103,6 +104,7 @@ def transcribe_with_transkriptor_and_save_aligned_subtitles(
     raw_srt_text = transkriptor_client.transcribe_audio_file(
         audio_file_path=audio_file_path,
         language_code=language_locale,
+        display_file_name=display_file_name,
         on_progress=on_progress,
     )
 

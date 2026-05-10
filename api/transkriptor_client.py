@@ -40,13 +40,14 @@ class TranskriptorClient:
         self,
         audio_file_path: Path,
         language_code: str = "lv-LV",
+        display_file_name: Optional[str] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Upload audio file, initiate transcription, poll until complete,
         and export as SRT. Returns raw SRT text.
         """
-        public_url = self._upload_file(audio_file_path, on_progress)
+        public_url = self._upload_file(audio_file_path, display_file_name, on_progress)
         order_id = self._initiate_transcription(public_url, language_code, on_progress)
         self._poll_until_complete(order_id, on_progress)
         return self._export_as_srt(order_id, on_progress)
@@ -54,6 +55,7 @@ class TranskriptorClient:
     def _upload_file(
         self,
         audio_file_path: Path,
+        display_file_name: Optional[str] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Upload file via presigned URL. Returns the public_url for transcription."""
@@ -62,7 +64,8 @@ class TranskriptorClient:
             if on_progress:
                 on_progress(message)
 
-        file_name = audio_file_path.name
+        file_extension = audio_file_path.suffix
+        file_name = (display_file_name + file_extension) if display_file_name else audio_file_path.name
         file_size_megabytes = audio_file_path.stat().st_size / (1024 * 1024)
         _log(f"Getting upload URL for: {file_name} ({file_size_megabytes:.1f} MB)")
 

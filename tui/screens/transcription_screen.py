@@ -498,6 +498,21 @@ class TranscriptionScreen(Screen):
                 f"{type(error).__name__}: {error}",
             )
 
+    def _delete_intermediate_audio_file(
+        self,
+        intermediate_path: Path,
+        original_path: Path,
+        on_progress,
+    ) -> None:
+        """Delete compressed audio file after successful upload. Never deletes originals."""
+        if intermediate_path == original_path:
+            return
+        if intermediate_path.exists():
+            intermediate_size_megabytes = intermediate_path.stat().st_size / (1024 * 1024)
+            intermediate_path.unlink()
+            message = f"Cleaned up intermediate file: {intermediate_path.name} ({intermediate_size_megabytes:.0f} MB freed)"
+            self.app.call_from_thread(self._log_widget.write_info, message)
+
     def _find_existing_transkriptor_transcription(self) -> Path | None:
         """Find most recent Transkriptor SRT in transcriptions/ folder."""
         from pipeline.transcription_runner import SERVICE_TRANSKRIPTOR
@@ -607,6 +622,7 @@ class TranscriptionScreen(Screen):
                 on_progress=on_progress,
             )
 
+            video_file_stem = self._pipeline_state.video_file_path.stem
             client = TranskriptorClient(api_key=transkriptor_api_key)
             output_path = build_transcription_output_path(
                 video_file_path=self._pipeline_state.video_file_path,
@@ -620,8 +636,12 @@ class TranscriptionScreen(Screen):
                 transkriptor_client=client,
                 audio_to_video_offset_seconds=0.0,
                 language_locale=transkriptor_locale,
+                display_file_name=video_file_stem,
                 on_progress=on_progress,
             )
+
+            self._delete_intermediate_audio_file(upload_path, audio_file_path, on_progress)
+
             self._pipeline_state.subtitle_file_path = subtitle_file_path
             self.app.call_from_thread(
                 log.write_success,
