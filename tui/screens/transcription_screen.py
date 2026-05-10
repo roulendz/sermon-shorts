@@ -534,14 +534,14 @@ class TranscriptionScreen(Screen):
             self.app.call_from_thread(log.write_info, message)
 
         try:
-            from pipeline.audio_compressor import compress_audio_if_needed
+            from pipeline.audio_compressor import compress_audio_for_transkriptor
             from pipeline.transcription_runner import (
                 transcribe_with_transkriptor_and_save_aligned_subtitles,
                 build_transcription_output_path,
                 SERVICE_TRANSKRIPTOR,
             )
 
-            upload_path = compress_audio_if_needed(
+            upload_path = compress_audio_for_transkriptor(
                 audio_file_path,
                 on_progress=on_progress,
             )
