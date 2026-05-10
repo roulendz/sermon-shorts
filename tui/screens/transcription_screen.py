@@ -66,6 +66,8 @@ class TranscriptionScreen(Screen):
         super().__init__()
         self._pipeline_state = pipeline_state
         self._latest_version_number: int | None = None
+        self._transkriptor_reuse_mode: bool = False
+        self._pending_transkriptor_existing_path: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -136,16 +138,23 @@ class TranscriptionScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "use-existing-button":
             self._disable_all_buttons()
-            self._load_existing_whisperx_data()
+            if self._transkriptor_reuse_mode:
+                self._use_existing_transkriptor_transcription()
+            else:
+                self._load_existing_whisperx_data()
         elif event.button.id == "retranscribe-button":
-            self._hide_choice_buttons()
-            self._show_service_buttons()
+            if self._transkriptor_reuse_mode:
+                self._transkriptor_reuse_mode = False
+                self._disable_all_buttons()
+                self._run_transkriptor_transcription()
+            else:
+                self._hide_choice_buttons()
+                self._show_service_buttons()
         elif event.button.id == "whisperx-wordlevel-button":
             self._disable_all_buttons()
             self._transcribe_all_audio_tracks()
         elif event.button.id == "transkriptor-button":
-            self._disable_all_buttons()
-            self._start_transkriptor_transcription()
+            self.on_button_pressed_transkriptor()
         elif event.button.id == "proceed-button":
             self._proceed_to_segment_selection_screen()
 
@@ -489,8 +498,62 @@ class TranscriptionScreen(Screen):
                 f"{type(error).__name__}: {error}",
             )
 
+    def _find_existing_transkriptor_transcription(self) -> Path | None:
+        """Find most recent Transkriptor SRT in transcriptions/ folder."""
+        from pipeline.transcription_runner import SERVICE_TRANSKRIPTOR
+
+        transcriptions_directory = (
+            self._pipeline_state.video_file_path.parent / "transcriptions"
+        )
+        if not transcriptions_directory.exists():
+            return None
+
+        transkriptor_files = sorted(
+            transcriptions_directory.glob(f"*_{SERVICE_TRANSKRIPTOR}_*.srt"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        return transkriptor_files[0] if transkriptor_files else None
+
+    def on_button_pressed_transkriptor(self) -> None:
+        existing_transcription_path = self._find_existing_transkriptor_transcription()
+
+        if existing_transcription_path is not None:
+            self._pending_transkriptor_existing_path = existing_transcription_path
+            self._show_transkriptor_reuse_choice(existing_transcription_path)
+        else:
+            self._disable_all_buttons()
+            self._run_transkriptor_transcription()
+
+    def _show_transkriptor_reuse_choice(self, existing_path: Path) -> None:
+        log = self._log_widget
+        log.write_info(
+            f"Existing Transkriptor transcription found: {existing_path.name}"
+        )
+        self._hide_service_buttons()
+        self._hide_choice_buttons()
+
+        use_existing_button = self.query_one("#use-existing-button", Button)
+        use_existing_button.label = "Use Existing Transkriptor"
+        use_existing_button.display = True
+        use_existing_button.disabled = False
+
+        retranscribe_button = self.query_one("#retranscribe-button", Button)
+        retranscribe_button.label = "Re-transcribe (Transkriptor)"
+        retranscribe_button.display = True
+        retranscribe_button.disabled = False
+
+        self._transkriptor_reuse_mode = True
+
+    def _use_existing_transkriptor_transcription(self) -> None:
+        log = self._log_widget
+        existing_path = self._pending_transkriptor_existing_path
+        self._pipeline_state.subtitle_file_path = existing_path
+        log.write_success(f"Using existing transcription: {existing_path.name}")
+        self._enable_proceed_button()
+
     @work(thread=True)
-    def _start_transkriptor_transcription(self) -> None:
+    def _run_transkriptor_transcription(self) -> None:
         from api.transkriptor_client import TranskriptorClient
         from pipeline.language_detect import (
             detect_language_from_filename,
@@ -509,13 +572,11 @@ class TranscriptionScreen(Screen):
             )
             return
 
-        # Use the first available audio track for Transkriptor
         discovered_tracks = self._pipeline_state.discovered_audio_tracks
         if not discovered_tracks:
             self.app.call_from_thread(log.write_error, "No audio tracks available")
             return
 
-        # Prefer LV track, fall back to first available
         audio_file_path = discovered_tracks.get("lv") or next(iter(discovered_tracks.values()))
         language_code = detect_language_from_filename(audio_file_path)
         transkriptor_locale = to_transkriptor_locale(language_code)
