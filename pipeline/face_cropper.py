@@ -43,7 +43,11 @@ RIGHT_HIP_INDEX = 24
 
 LANDMARK_VISIBILITY_THRESHOLD = 0.5
 FACING_SMOOTHING_FACTOR = 0.15
-MAX_DEAD_ZONE_SHIFT_RATIO = 1.0 / 6.0
+MOVEMENT_SMOOTHING_FACTOR = 0.2
+VELOCITY_SCALE_RATIO = 0.008
+MAX_DEAD_ZONE_SHIFT_RATIO = 1.0 / 3.0
+MOVEMENT_WEIGHT = 0.8
+FACING_WEIGHT = 0.2
 
 
 class PortraitCropError(Exception):
@@ -71,44 +75,60 @@ class DeadZoneCropTracker:
         self.current_crop_center: float = source_width / 2.0
         self._initialized: bool = False
         self._smoothed_facing: float = 0.0
-        self.dead_zone_left_offset: float = 0.0
-        self.dead_zone_right_offset: float = 0.0
+        self._smoothed_movement: float = 0.0
+        self._previous_target_x: Optional[float] = None
+        self._velocity_scale: float = crop_width * VELOCITY_SCALE_RATIO
+        self.combined_lead_direction: float = 0.0
 
     def update(self, target_center_x: Optional[int], facing_direction: float = 0.0) -> int:
         """
         Feed detected body center X position and facing direction.
-        facing_direction: -1 = facing left, +1 = facing right.
-        Dead zone shifts to give lead room in the direction subject faces.
-        First detection snaps instantly. After that, proportional easing.
+        Computes movement velocity from consecutive frames and combines with
+        facing direction (70/30 weight) for lead room offset.
+        Moving right → space on right. Facing left while still → space on left.
         """
         self._smoothed_facing += (facing_direction - self._smoothed_facing) * FACING_SMOOTHING_FACTOR
+
+        if target_center_x is not None and self._previous_target_x is not None:
+            velocity = target_center_x - self._previous_target_x
+            movement_direction = max(-1.0, min(1.0, velocity / self._velocity_scale))
+        else:
+            movement_direction = 0.0
+
+        if target_center_x is not None:
+            self._previous_target_x = float(target_center_x)
+
+        self._smoothed_movement += (movement_direction - self._smoothed_movement) * MOVEMENT_SMOOTHING_FACTOR
+
+        self.combined_lead_direction = max(-1.0, min(1.0,
+            MOVEMENT_WEIGHT * self._smoothed_movement + FACING_WEIGHT * self._smoothed_facing,
+        ))
 
         if target_center_x is None:
             return self._clamp_crop_x_start()
 
+        lead_room_offset = self.combined_lead_direction * self.crop_width * MAX_DEAD_ZONE_SHIFT_RATIO
+
         if not self._initialized:
-            self.current_crop_center = float(target_center_x)
+            self.current_crop_center = float(target_center_x) + lead_room_offset
             self._initialized = True
             return self._clamp_crop_x_start()
 
-        max_shift = self.crop_width * MAX_DEAD_ZONE_SHIFT_RATIO
-        dead_zone_shift = -self._smoothed_facing * max_shift
-
-        dead_zone_left = self.crop_width / 3 + dead_zone_shift
-        dead_zone_right = self.crop_width * 2 / 3 + dead_zone_shift
-        self.dead_zone_left_offset = dead_zone_shift
-        self.dead_zone_right_offset = dead_zone_shift
+        adjusted_target_x = target_center_x + lead_room_offset
 
         crop_left = self.current_crop_center - self.crop_width / 2
-        position_in_crop = target_center_x - crop_left
+        position_in_crop = adjusted_target_x - crop_left
+
+        dead_zone_left = self.crop_width / 3
+        dead_zone_right = self.crop_width * 2 / 3
 
         if dead_zone_left <= position_in_crop <= dead_zone_right:
             return self._clamp_crop_x_start()
 
         if position_in_crop < dead_zone_left:
-            target_center = target_center_x - dead_zone_left + self.crop_width / 2
+            target_center = adjusted_target_x - dead_zone_left + self.crop_width / 2
         else:
-            target_center = target_center_x - dead_zone_right + self.crop_width / 2
+            target_center = adjusted_target_x - dead_zone_right + self.crop_width / 2
 
         delta = target_center - self.current_crop_center
         self.current_crop_center += delta * self.easing_factor
@@ -438,8 +458,8 @@ def generate_debug_video(
                 color_red, 3,
             )
 
-            dead_zone_left = crop_x_start + int(crop_width / 3 + tracker.dead_zone_left_offset)
-            dead_zone_right = crop_x_start + int(crop_width * 2 / 3 + tracker.dead_zone_right_offset)
+            dead_zone_left = crop_x_start + crop_width // 3
+            dead_zone_right = crop_x_start + crop_width * 2 // 3
             cv2.line(frame, (dead_zone_left, 0), (dead_zone_left, source_height), color_yellow, 1)
             cv2.line(frame, (dead_zone_right, 0), (dead_zone_right, source_height), color_yellow, 1)
 
@@ -452,10 +472,15 @@ def generate_debug_video(
 
             body_label = f"body_x={body_center_x}" if body_center_x else "NO POSE"
             crop_label = f"crop=[{crop_x_start}..{crop_x_end}] center={int(tracker.current_crop_center)}"
-            facing_label = f"facing={tracker._smoothed_facing:+.2f} ({'LEFT' if tracker._smoothed_facing < -0.1 else 'RIGHT' if tracker._smoothed_facing > 0.1 else 'CENTER'})"
+            lead_direction = tracker.combined_lead_direction
+            lead_label = (
+                f"lead={lead_direction:+.2f} "
+                f"(move={tracker._smoothed_movement:+.2f} face={tracker._smoothed_facing:+.2f}) "
+                f"{'<< LEFT' if lead_direction < -0.1 else 'RIGHT >>' if lead_direction > 0.1 else 'CENTER'}"
+            )
             cv2.putText(frame, body_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_white, 2)
             cv2.putText(frame, crop_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_white, 2)
-            cv2.putText(frame, facing_label, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_yellow, 2)
+            cv2.putText(frame, lead_label, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_yellow, 2)
 
             if not frame.flags["C_CONTIGUOUS"]:
                 frame = np.ascontiguousarray(frame)
