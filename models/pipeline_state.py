@@ -27,6 +27,9 @@ class PipelineState:
     # ── Set after Manus segment selection ────────────────────────────────────
     selected_segments: list[VideoSegment] = field(default_factory=list)
 
+    # ── Cutting options — set before cutting begins ────────────────────────────
+    enable_portrait_crop: bool = True
+
     # ── Auto flags — loaded from .env, skips human confirmation steps ────────
     auto_transcription: bool = False
     auto_segment_selection: bool = False

@@ -9,3 +9,5 @@ logs/
 .user_prefs.json
 .pytest_cache/
 .claude/
+.models/
+.planning/

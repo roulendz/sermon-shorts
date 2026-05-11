@@ -35,12 +35,15 @@ POSE_MODEL_FILENAME = "pose_landmarker_heavy.task"
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 
+NOSE_INDEX = 0
 LEFT_SHOULDER_INDEX = 11
 RIGHT_SHOULDER_INDEX = 12
 LEFT_HIP_INDEX = 23
 RIGHT_HIP_INDEX = 24
 
 LANDMARK_VISIBILITY_THRESHOLD = 0.5
+FACING_SMOOTHING_FACTOR = 0.15
+MAX_DEAD_ZONE_SHIFT_RATIO = 1.0 / 6.0
 
 
 class PortraitCropError(Exception):
@@ -67,13 +70,19 @@ class DeadZoneCropTracker:
         self.easing_factor = easing_factor
         self.current_crop_center: float = source_width / 2.0
         self._initialized: bool = False
+        self._smoothed_facing: float = 0.0
+        self.dead_zone_left_offset: float = 0.0
+        self.dead_zone_right_offset: float = 0.0
 
-    def update(self, target_center_x: Optional[int]) -> int:
+    def update(self, target_center_x: Optional[int], facing_direction: float = 0.0) -> int:
         """
-        Feed detected body center X position (or None if lost).
-        Returns crop x_start in pixels.
+        Feed detected body center X position and facing direction.
+        facing_direction: -1 = facing left, +1 = facing right.
+        Dead zone shifts to give lead room in the direction subject faces.
         First detection snaps instantly. After that, proportional easing.
         """
+        self._smoothed_facing += (facing_direction - self._smoothed_facing) * FACING_SMOOTHING_FACTOR
+
         if target_center_x is None:
             return self._clamp_crop_x_start()
 
@@ -82,11 +91,16 @@ class DeadZoneCropTracker:
             self._initialized = True
             return self._clamp_crop_x_start()
 
+        max_shift = self.crop_width * MAX_DEAD_ZONE_SHIFT_RATIO
+        dead_zone_shift = -self._smoothed_facing * max_shift
+
+        dead_zone_left = self.crop_width / 3 + dead_zone_shift
+        dead_zone_right = self.crop_width * 2 / 3 + dead_zone_shift
+        self.dead_zone_left_offset = dead_zone_shift
+        self.dead_zone_right_offset = dead_zone_shift
+
         crop_left = self.current_crop_center - self.crop_width / 2
         position_in_crop = target_center_x - crop_left
-
-        dead_zone_left = self.crop_width / 3
-        dead_zone_right = self.crop_width * 2 / 3
 
         if dead_zone_left <= position_in_crop <= dead_zone_right:
             return self._clamp_crop_x_start()
@@ -162,6 +176,33 @@ def _shoulder_center_x(landmarks, frame_width: int) -> Optional[int]:
     if right_visible:
         return int(right_shoulder.x * frame_width)
     return None
+
+
+def _compute_facing_direction(landmarks) -> float:
+    """
+    Compute facing direction from nose position relative to shoulder midpoint.
+    Returns -1.0 (facing left) to +1.0 (facing right), normalized by shoulder width.
+    Returns 0.0 if landmarks not visible enough.
+    """
+    nose = landmarks[NOSE_INDEX]
+    left_shoulder = landmarks[LEFT_SHOULDER_INDEX]
+    right_shoulder = landmarks[RIGHT_SHOULDER_INDEX]
+
+    if nose.visibility < LANDMARK_VISIBILITY_THRESHOLD:
+        return 0.0
+    if left_shoulder.visibility < LANDMARK_VISIBILITY_THRESHOLD:
+        return 0.0
+    if right_shoulder.visibility < LANDMARK_VISIBILITY_THRESHOLD:
+        return 0.0
+
+    shoulder_midpoint_x = (left_shoulder.x + right_shoulder.x) / 2
+    shoulder_width = abs(left_shoulder.x - right_shoulder.x)
+
+    if shoulder_width < 0.01:
+        return 0.0
+
+    facing_ratio = (nose.x - shoulder_midpoint_x) / shoulder_width
+    return max(-1.0, min(1.0, facing_ratio))
 
 
 def crop_segment_to_portrait(
@@ -245,8 +286,9 @@ def crop_segment_to_portrait(
 
             landmarks = _detect_pose_landmarks(landmarker, frame_rgb, timestamp_ms)
             body_center_x = _shoulder_center_x(landmarks, source_width) if landmarks else None
+            facing_direction = _compute_facing_direction(landmarks) if landmarks else 0.0
 
-            crop_x_start = tracker.update(body_center_x)
+            crop_x_start = tracker.update(body_center_x, facing_direction)
 
             cropped_frame = frame[:, crop_x_start : crop_x_start + crop_width]
             if not cropped_frame.flags["C_CONTIGUOUS"]:
@@ -376,15 +418,17 @@ def generate_debug_video(
 
             landmarks = _detect_pose_landmarks(landmarker, frame_rgb, timestamp_ms)
             body_center_x = None
+            facing_direction = 0.0
 
             if landmarks is not None:
                 body_center_x = _shoulder_center_x(landmarks, source_width)
+                facing_direction = _compute_facing_direction(landmarks)
                 _draw_pose_overlay(
                     frame, landmarks, source_width, source_height,
                     color_green, color_cyan,
                 )
 
-            crop_x_start = tracker.update(body_center_x)
+            crop_x_start = tracker.update(body_center_x, facing_direction)
             crop_x_end = crop_x_start + crop_width
 
             cv2.rectangle(
@@ -394,10 +438,10 @@ def generate_debug_video(
                 color_red, 3,
             )
 
-            third_left = crop_x_start + crop_width // 3
-            third_right = crop_x_start + crop_width * 2 // 3
-            cv2.line(frame, (third_left, 0), (third_left, source_height), color_yellow, 1)
-            cv2.line(frame, (third_right, 0), (third_right, source_height), color_yellow, 1)
+            dead_zone_left = crop_x_start + int(crop_width / 3 + tracker.dead_zone_left_offset)
+            dead_zone_right = crop_x_start + int(crop_width * 2 / 3 + tracker.dead_zone_right_offset)
+            cv2.line(frame, (dead_zone_left, 0), (dead_zone_left, source_height), color_yellow, 1)
+            cv2.line(frame, (dead_zone_right, 0), (dead_zone_right, source_height), color_yellow, 1)
 
             dim_left = frame[:, :crop_x_start]
             dim_right = frame[:, crop_x_end:]
@@ -408,8 +452,10 @@ def generate_debug_video(
 
             body_label = f"body_x={body_center_x}" if body_center_x else "NO POSE"
             crop_label = f"crop=[{crop_x_start}..{crop_x_end}] center={int(tracker.current_crop_center)}"
+            facing_label = f"facing={tracker._smoothed_facing:+.2f} ({'LEFT' if tracker._smoothed_facing < -0.1 else 'RIGHT' if tracker._smoothed_facing > 0.1 else 'CENTER'})"
             cv2.putText(frame, body_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_white, 2)
             cv2.putText(frame, crop_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_white, 2)
+            cv2.putText(frame, facing_label, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color_yellow, 2)
 
             if not frame.flags["C_CONTIGUOUS"]:
                 frame = np.ascontiguousarray(frame)
