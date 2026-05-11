@@ -135,6 +135,17 @@ class CuttingScreen(Screen):
                     placeholder="1.3",
                     id="speed-multiplier-input",
                 )
+                yield Checkbox(
+                    "Remove silences from portrait output",
+                    value=self._pipeline_state.remove_silence,
+                    id="remove-silence-checkbox",
+                )
+                yield Label("Minimum silence duration to cut (seconds):")
+                yield Input(
+                    value=str(self._pipeline_state.silence_minimum_duration_seconds),
+                    placeholder="1.0",
+                    id="silence-duration-input",
+                )
             with Vertical(id="existing-clips-container"):
                 yield Label("Existing Clips Found", id="existing-clips-label")
                 yield RadioSet(id="existing-clips-radio")
@@ -198,6 +209,8 @@ class CuttingScreen(Screen):
             self._pipeline_state.enable_portrait_crop = event.value
         elif event.checkbox.id == "debug-overlay-checkbox":
             self._enable_debug_overlay = event.value
+        elif event.checkbox.id == "remove-silence-checkbox":
+            self._pipeline_state.remove_silence = event.value
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "speed-multiplier-input":
@@ -205,6 +218,13 @@ class CuttingScreen(Screen):
                 value = float(event.value)
                 if 0.5 <= value <= 3.0:
                     self._pipeline_state.portrait_speed_multiplier = value
+            except ValueError:
+                pass
+        elif event.input.id == "silence-duration-input":
+            try:
+                value = float(event.value)
+                if 0.1 <= value <= 10.0:
+                    self._pipeline_state.silence_minimum_duration_seconds = value
             except ValueError:
                 pass
 
@@ -471,6 +491,7 @@ class CuttingScreen(Screen):
         )
 
         portrait_success_count = 0
+        portrait_paths: list[Path] = []
 
         for landscape_path, segment in cut_video_paths:
             try:
@@ -521,6 +542,7 @@ class CuttingScreen(Screen):
                     log.write_success,
                     f"Segment {segment.index} portrait{speed_label}: {portrait_output_path.name}",
                 )
+                portrait_paths.append(portrait_output_path)
                 portrait_success_count += 1
 
             except (PortraitCropError, Exception) as error:
@@ -528,6 +550,9 @@ class CuttingScreen(Screen):
                     log.write_error,
                     f"Segment {segment.index} portrait crop failed: {error}",
                 )
+
+        if self._pipeline_state.remove_silence and portrait_paths:
+            self._run_silence_removal(portrait_paths)
 
         total_segments = len(self._pipeline_state.selected_segments)
         self.app.call_from_thread(
@@ -560,6 +585,7 @@ class CuttingScreen(Screen):
         )
 
         portrait_success_count = 0
+        portrait_paths: list[Path] = []
 
         for clip_path, segment in clip_segment_pairs:
             if "[portrait]" in clip_path.name or "[debug]" in clip_path.name:
@@ -621,6 +647,7 @@ class CuttingScreen(Screen):
                     log.write_success,
                     f"  Portrait created{speed_label}: {portrait_output_path.name}",
                 )
+                portrait_paths.append(portrait_output_path)
                 portrait_success_count += 1
 
             except (PortraitCropError, Exception) as error:
@@ -629,12 +656,56 @@ class CuttingScreen(Screen):
                     f"  Portrait crop failed for {clip_path.name}: {error}",
                 )
 
+        if self._pipeline_state.remove_silence and portrait_paths:
+            self._run_silence_removal(portrait_paths)
+
         self.app.call_from_thread(
             self._show_completion_message,
             len(clip_segment_pairs),
             len(clip_segment_pairs),
             portrait_success_count,
         )
+
+    def _run_silence_removal(self, portrait_paths: list[Path]) -> None:
+        from pipeline.silence_remover import (
+            remove_silence_from_video,
+            build_silence_removed_output_path,
+            SilenceRemovalError,
+        )
+
+        log = self._log_widget
+        minimum_duration = self._pipeline_state.silence_minimum_duration_seconds
+
+        self.app.call_from_thread(log.write_step_header, "Silence Removal")
+        self.app.call_from_thread(
+            log.write_info,
+            f"Removing silences >{minimum_duration}s from {len(portrait_paths)} clips...",
+        )
+
+        for portrait_path in portrait_paths:
+            try:
+                output_path = build_silence_removed_output_path(portrait_path)
+
+                def on_silence_progress(message: str, name=portrait_path.stem):
+                    self.app.call_from_thread(log.write_info, f"  {name}: {message}")
+
+                remove_silence_from_video(
+                    source_video_path=portrait_path,
+                    output_file_path=output_path,
+                    minimum_duration_seconds=minimum_duration,
+                    on_progress=on_silence_progress,
+                )
+
+                self.app.call_from_thread(
+                    log.write_success,
+                    f"  Trimmed: {output_path.name}",
+                )
+
+            except SilenceRemovalError as error:
+                self.app.call_from_thread(
+                    log.write_error,
+                    f"  Silence removal failed for {portrait_path.name}: {error}",
+                )
 
     def _save_segment_subtitles(
         self,

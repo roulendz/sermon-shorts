@@ -30,6 +30,8 @@ class PipelineState:
     # ── Cutting options — set before cutting begins ────────────────────────────
     enable_portrait_crop: bool = True
     portrait_speed_multiplier: float = 1.3
+    remove_silence: bool = True
+    silence_minimum_duration_seconds: float = 1.0
 
     # ── Auto flags — loaded from .env, skips human confirmation steps ────────
     auto_transcription: bool = False
