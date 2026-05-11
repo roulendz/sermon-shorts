@@ -232,6 +232,7 @@ def crop_segment_to_portrait(
     duration_seconds: float,
     model_directory: Path,
     easing_factor: float = 0.3,
+    speed_multiplier: float = 1.0,
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> Path:
     """
@@ -274,6 +275,7 @@ def crop_segment_to_portrait(
         frame_rate=frame_rate,
         start_seconds=start_seconds,
         duration_seconds=duration_seconds,
+        speed_multiplier=speed_multiplier,
     )
 
     ffmpeg_process = subprocess.Popen(
@@ -554,15 +556,22 @@ def _build_portrait_encoding_command(
     frame_rate: float,
     start_seconds: float,
     duration_seconds: float,
+    speed_multiplier: float = 1.0,
 ) -> list[str]:
     """Build FFmpeg command for portrait encoding with audio from original."""
+    input_framerate = frame_rate * speed_multiplier
+
+    audio_filter_arguments: list[str] = []
+    if speed_multiplier != 1.0:
+        audio_filter_arguments = ["-af", f"atempo={speed_multiplier}"]
+
     return [
         "ffmpeg",
         "-y",
         "-f", "rawvideo",
         "-pixel_format", "bgr24",
         "-video_size", f"{crop_width}x{crop_height}",
-        "-framerate", str(frame_rate),
+        "-framerate", str(input_framerate),
         "-i", "pipe:0",
         "-ss", f"{start_seconds:.3f}",
         "-t", f"{duration_seconds:.3f}",
@@ -570,13 +579,14 @@ def _build_portrait_encoding_command(
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-vf", f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}",
+        "-r", str(frame_rate),
         "-c:v", "libx264",
         "-profile:v", "high",
         "-level:v", "4.2",
         "-preset", "medium",
         "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
+        *audio_filter_arguments,
         "-movflags", "+faststart",
         "-shortest",
         str(output_file_path),

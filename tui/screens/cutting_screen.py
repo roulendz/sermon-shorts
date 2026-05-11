@@ -22,6 +22,7 @@ from textual.widgets import (
     Checkbox,
     Footer,
     Header,
+    Input,
     Label,
     RadioButton,
     RadioSet,
@@ -128,6 +129,12 @@ class CuttingScreen(Screen):
                     value=False,
                     id="debug-overlay-checkbox",
                 )
+                yield Label("Playback speed multiplier (1.0 = normal):")
+                yield Input(
+                    value=str(self._pipeline_state.portrait_speed_multiplier),
+                    placeholder="1.3",
+                    id="speed-multiplier-input",
+                )
             with Vertical(id="existing-clips-container"):
                 yield Label("Existing Clips Found", id="existing-clips-label")
                 yield RadioSet(id="existing-clips-radio")
@@ -191,6 +198,15 @@ class CuttingScreen(Screen):
             self._pipeline_state.enable_portrait_crop = event.value
         elif event.checkbox.id == "debug-overlay-checkbox":
             self._enable_debug_overlay = event.value
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "speed-multiplier-input":
+            try:
+                value = float(event.value)
+                if 0.5 <= value <= 3.0:
+                    self._pipeline_state.portrait_speed_multiplier = value
+            except ValueError:
+                pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "start-cutting-button":
@@ -494,12 +510,16 @@ class CuttingScreen(Screen):
                     start_seconds=0.0,
                     duration_seconds=segment.duration_seconds,
                     model_directory=model_directory,
+                    speed_multiplier=self._pipeline_state.portrait_speed_multiplier,
                     on_progress=on_crop_progress,
                 )
 
+                speed_label = ""
+                if self._pipeline_state.portrait_speed_multiplier != 1.0:
+                    speed_label = f" ({self._pipeline_state.portrait_speed_multiplier}x)"
                 self.app.call_from_thread(
                     log.write_success,
-                    f"Segment {segment.index} portrait: {portrait_output_path.name}",
+                    f"Segment {segment.index} portrait{speed_label}: {portrait_output_path.name}",
                 )
                 portrait_success_count += 1
 
@@ -590,12 +610,16 @@ class CuttingScreen(Screen):
                     start_seconds=0.0,
                     duration_seconds=segment.duration_seconds,
                     model_directory=model_directory,
+                    speed_multiplier=self._pipeline_state.portrait_speed_multiplier,
                     on_progress=on_crop_progress,
                 )
 
+                speed_label = ""
+                if self._pipeline_state.portrait_speed_multiplier != 1.0:
+                    speed_label = f" ({self._pipeline_state.portrait_speed_multiplier}x)"
                 self.app.call_from_thread(
                     log.write_success,
-                    f"  Portrait created: {portrait_output_path.name}",
+                    f"  Portrait created{speed_label}: {portrait_output_path.name}",
                 )
                 portrait_success_count += 1
 
