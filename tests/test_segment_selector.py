@@ -64,7 +64,7 @@ def make_subtitle_list_for_window_test() -> list[srt.Subtitle]:
     ]
 
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
+# -- Prompt builder -----------------------------------------------------------
 
 def test_build_segment_selection_prompt_includes_srt_content():
     srt_content = "1\n00:01:00,000 --> 00:01:05,000\nHello world.\n"
@@ -111,7 +111,7 @@ def test_build_segment_selection_prompt_includes_all_four_scoring_dimensions():
     assert "shareability" in prompt
 
 
-# ── JSON extractor ────────────────────────────────────────────────────────────
+# -- JSON extractor -----------------------------------------------------------
 
 def test_extract_json_from_response_text_parses_clean_json():
     parsed = extract_json_from_response_text(VALID_MANUS_RESPONSE_JSON)
@@ -124,7 +124,7 @@ def test_extract_json_from_response_text_strips_markdown_fences():
 
 
 def test_extract_json_from_response_text_raises_on_invalid_json():
-    with pytest.raises(ValueError, match="Could not parse JSON"):
+    with pytest.raises(ValueError, match="Could not find JSON"):
         extract_json_from_response_text("this is not json at all")
 
 
@@ -134,7 +134,57 @@ def test_extract_json_from_response_text_handles_surrounding_whitespace():
     assert "potential_clips" in parsed
 
 
-# ── Float seconds converter ───────────────────────────────────────────────────
+def test_extract_json_from_response_text_finds_json_embedded_in_conversation():
+    """Manus often wraps JSON in conversational text when returning via file download."""
+    response_with_surrounding_text = (
+        "Here is the analysis of the sermon transcript. "
+        "I identified the most viral-worthy segments:\n\n"
+        f"{VALID_MANUS_RESPONSE_JSON}\n\n"
+        "Let me know if you need any changes to the selection."
+    )
+    parsed = extract_json_from_response_text(response_with_surrounding_text)
+    assert "potential_clips" in parsed
+    assert len(parsed["potential_clips"]) == 2
+
+
+def test_extract_json_from_response_text_handles_json_with_corrected_text_fields():
+    """Cached responses may include corrected_text fields with special characters."""
+    response_with_corrected_text = """{
+      "potential_clips": [
+        {
+          "index": 1,
+          "start_time": 100.0,
+          "end_time": 160.0,
+          "suggested_title": "Test Title",
+          "viral_hook_text_overlay": "Hook text",
+          "scoring_analysis": {
+            "hook_power_score": 8,
+            "emotional_impact_score": 7,
+            "discussion_potential_score": 6,
+            "shareability_score": 9,
+            "overall_viral_score": 7.5
+          },
+          "reason_for_selection": "Good segment",
+          "corrected_text_ru": "\\u0414\\u0438\\u0435\\u0432\\u0441 \\u043c\\u0438\\u043b\\u0435\\u0441\\u0442\\u0438\\u0431\\u0430",
+          "corrected_text_lv": "Dieva mīlestība ir liela"
+        }
+      ]
+    }"""
+    parsed = extract_json_from_response_text(response_with_corrected_text)
+    assert "potential_clips" in parsed
+    assert parsed["potential_clips"][0].get("corrected_text_lv") == "Dieva mīlestība ir liela"
+
+
+def test_extract_json_from_response_text_error_message_includes_diagnostics():
+    """Error message should include response length and content preview for debugging."""
+    with pytest.raises(ValueError) as exception_info:
+        extract_json_from_response_text("no json here, just plain text response")
+    error_message = str(exception_info.value)
+    assert "Response length:" in error_message
+    assert "first 500 chars" in error_message
+
+
+# -- Float seconds converter --------------------------------------------------
 
 def test_convert_seconds_float_to_timedelta_converts_whole_seconds():
     result = convert_seconds_float_to_timedelta(60.0)
@@ -156,7 +206,7 @@ def test_convert_seconds_float_to_timedelta_converts_large_value():
     assert result == timedelta(hours=1, minutes=1, seconds=1)
 
 
-# ── Transcript text extractor ─────────────────────────────────────────────────
+# -- Transcript text extractor ------------------------------------------------
 
 def test_extract_transcript_text_for_window_returns_text_within_range():
     subtitles = make_subtitle_list_for_window_test()
@@ -189,7 +239,7 @@ def test_extract_transcript_text_for_window_returns_empty_string_when_no_match()
     assert text == ""
 
 
-# ── Full response parser ──────────────────────────────────────────────────────
+# -- Full response parser -----------------------------------------------------
 
 def test_parse_segments_from_manus_response_returns_correct_segment_count():
     subtitles = make_subtitle_list_for_window_test()
@@ -255,3 +305,32 @@ def test_parse_segments_from_manus_response_raises_when_potential_clips_is_empty
     empty_response = '{"potential_clips": []}'
     with pytest.raises(ValueError, match="no segments"):
         parse_segments_from_manus_response(empty_response, [])
+
+
+def test_parse_segments_from_manus_response_uses_corrected_text_when_available():
+    """When Manus provides corrected text, it should be used instead of subtitle extraction."""
+    response_with_corrections = """{
+      "potential_clips": [
+        {
+          "index": 1,
+          "start_time": 300.0,
+          "end_time": 320.0,
+          "suggested_title": "Test Title",
+          "viral_hook_text_overlay": "Hook",
+          "scoring_analysis": {
+            "hook_power_score": 8,
+            "emotional_impact_score": 7,
+            "discussion_potential_score": 6,
+            "shareability_score": 9,
+            "overall_viral_score": 7.5
+          },
+          "reason_for_selection": "Good segment",
+          "corrected_text_ru": "Corrected Russian text",
+          "corrected_text_lv": "Corrected Latvian text"
+        }
+      ]
+    }"""
+    subtitles = make_subtitle_list_for_window_test()
+    segments = parse_segments_from_manus_response(response_with_corrections, subtitles)
+    assert "Corrected Russian text" in segments[0].transcript_text
+    assert "Corrected Latvian text" in segments[0].transcript_text

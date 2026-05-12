@@ -35,11 +35,11 @@ Read the ENTIRE SRT transcript below and identify the {minimum_clips} to \
 {maximum_clips} most viral-worthy segments.
 
 STRICT RULES:
-1. Each clip must be between 60 and 120 seconds long
+1. Each clip must be between 50 and 90 seconds long
 2. Return timestamps in ABSOLUTE SECONDS as a float (e.g. 95.350), \
 derived from the SRT timestamps in the file
-3. Start 0.2-0.5 seconds before a strong hook word
-4. End 0.2-0.5 seconds after a strong payoff word for natural pacing
+3. Start 0.5-1.0 seconds before a strong hook word
+4. End 0.5-1.0 seconds after a strong payoff word for natural pacing
 5. Each clip must be a complete, self-contained thought — never cut mid-sentence
 6. Segments must NOT overlap
 7. Do not select generic intros, outros, or announcements
@@ -71,8 +71,12 @@ Respond with ONLY valid JSON — no markdown fences, no explanation, nothing els
       "index": 1,
       "start_time": <float>,
       "end_time": <float>,
-      "suggested_title": "<punchy viral-worthy title, max 70 characters>",
-      "viral_hook_text_overlay": "<max 10 words for opening text overlay>",
+      "suggested_title": "<punchy viral-worthy title in Latvian, max 70 characters use /humanizer skill>",
+      "suggested_title_ru": "<punchy viral-worthy title in Russian, max 70 characters use /humanizer skill>",
+      "suggested_title_en": "<punchy viral-worthy title in English, max 70 characters use /humanizer skill>",
+      "viral_hook_text_overlay": "<max 10 words for opening text in Latvian overlay use /humanizer skill>",
+      "viral_hook_text_overlay_ru": "<max 10 words for opening text in Russian overlay use /humanizer skill>",
+      "viral_hook_text_overlay_en": "<max 10 words for opening text in English overlay use /humanizer skill>",
       "scoring_analysis": {{
         "hook_power_score": <int 0-10>,
         "emotional_impact_score": <int 0-10>,
@@ -109,6 +113,11 @@ def parse_segments_from_manus_response(
     Timestamps in the response are absolute seconds (float).
     Transcript text is extracted from the full subtitle list by time window.
     """
+    logger.info(
+        "Parsing Manus response (%d characters) with %d subtitles",
+        len(manus_response_text),
+        len(all_subtitles),
+    )
     response_json = extract_json_from_response_text(manus_response_text)
     raw_clips = response_json.get("potential_clips", [])
 
@@ -169,11 +178,20 @@ def extract_json_from_response_text(response_text: str) -> dict:
 
     # Try direct parse first
     try:
-        return json.loads(cleaned_text)
+        parsed = json.loads(cleaned_text)
+        if isinstance(parsed, dict) and "potential_clips" in parsed:
+            logger.info("Parsed JSON directly from response text")
+            return parsed
+        logger.warning(
+            "Direct JSON parse succeeded but missing 'potential_clips' key. "
+            "Top-level keys: %s",
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
+        )
     except json.JSONDecodeError:
         pass
 
     # Find JSON object by scanning for opening brace containing potential_clips
+    candidates_checked = 0
     for match in re.finditer(r'\{', cleaned_text):
         start = match.start()
         # Try progressively larger substrings from this brace
@@ -185,17 +203,32 @@ def extract_json_from_response_text(response_text: str) -> dict:
                 depth -= 1
                 if depth == 0:
                     candidate = cleaned_text[start:i + 1]
+                    candidates_checked += 1
                     try:
                         parsed = json.loads(candidate)
                         if isinstance(parsed, dict) and "potential_clips" in parsed:
+                            logger.info(
+                                "Found JSON with 'potential_clips' via brace scan "
+                                "(checked %d candidates)",
+                                candidates_checked,
+                            )
                             return parsed
                     except json.JSONDecodeError:
                         pass
                     break
 
+    logger.error(
+        "Could not find JSON with 'potential_clips' in Manus response. "
+        "Checked %d brace-delimited candidates. Response length: %d chars",
+        candidates_checked,
+        len(response_text),
+    )
     raise ValueError(
         f"Could not find JSON with 'potential_clips' in Manus response.\n"
-        f"Response (last 1000 chars): {response_text[-1000:]}"
+        f"Response length: {len(response_text)} chars. "
+        f"Checked {candidates_checked} JSON candidates.\n"
+        f"Response (first 500 chars): {response_text[:500]}\n"
+        f"Response (last 500 chars): {response_text[-500:]}"
     )
 
 
