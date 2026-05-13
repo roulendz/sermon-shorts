@@ -35,10 +35,12 @@ If -25dB clips quiet speech, try:
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from typing import Callable, Optional
 
+logger = logging.getLogger(__name__)
 
 # Recommended defaults from tuning
 DEFAULT_NOISE_THRESHOLD_DB = -45
@@ -57,6 +59,7 @@ def detect_silence_regions(
     Returns list of (silence_start, silence_end) tuples in seconds.
     """
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 
@@ -69,8 +72,9 @@ def detect_silence_regions(
         "-f", "null", "-",
     ]
 
+    logger.debug("FFmpeg command: %s", " ".join(command))
     _log(f"Running silence detection ({noise_threshold_db}dB, {minimum_silence_duration_seconds}s min)...")
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*([\d.]+)", result.stderr)]
     ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([\d.]+)", result.stderr)]
@@ -110,9 +114,5 @@ def silence_regions_to_speech_regions(
 
 def get_audio_duration_seconds(audio_file_path: str) -> float:
     """Get duration of audio file using FFprobe."""
-    result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(audio_file_path)],
-        capture_output=True, text=True,
-    )
-    return float(result.stdout.strip())
+    from pipeline.video_probe import probe_duration_seconds
+    return probe_duration_seconds(Path(audio_file_path))

@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
+from pipeline.video_probe import probe_duration_seconds
+
 logger = logging.getLogger(__name__)
 
 SILENCE_DETECT_NOISE_THRESHOLD = "-30dB"
@@ -39,13 +41,17 @@ def detect_silence_ranges(
         "-",
     ]
 
+    logger.debug("FFmpeg command: %s", " ".join(command))
+
     result = subprocess.run(
         command,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
-    stderr_output = result.stderr
+    stderr_output = result.stderr or ""
     silence_ranges: list[tuple[float, float]] = []
 
     start_pattern = re.compile(r"silence_start: ([\d.]+)")
@@ -103,6 +109,8 @@ def remove_silence_from_video(
     Detect silent periods and produce a new video with silences removed.
     Returns output path. Raises SilenceRemovalError on failure.
     """
+    logger.info("Silence removal: %s → %s", source_video_path.name, output_file_path.name)
+
     if on_progress:
         on_progress("Detecting silence...")
 
@@ -120,12 +128,7 @@ def remove_silence_from_video(
     if on_progress:
         on_progress(f"Found {len(silence_ranges)} silent gaps ({total_silence:.1f}s total)")
 
-    duration_result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-         "-of", "csv=p=0", str(source_video_path)],
-        capture_output=True, text=True,
-    )
-    total_duration = float(duration_result.stdout.strip())
+    total_duration = probe_duration_seconds(source_video_path)
 
     non_silent_segments = build_non_silent_segments(total_duration, silence_ranges)
 
@@ -164,9 +167,12 @@ def remove_silence_from_video(
         str(output_file_path),
     ]
 
-    process_result = subprocess.run(command, capture_output=True, text=True)
+    logger.debug("FFmpeg command: %s", " ".join(command))
+
+    process_result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     if process_result.returncode != 0:
+        logger.error("FFmpeg silence removal failed (exit %d): %s", process_result.returncode, process_result.stderr[-500:])
         raise SilenceRemovalError(
             f"FFmpeg silence removal failed:\n{process_result.stderr[-2000:]}"
         )

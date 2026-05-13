@@ -85,11 +85,14 @@ def run_ffmpeg_command(ffmpeg_arguments: list[str]) -> None:
     """
     Execute an FFmpeg command and raise a descriptive error if it fails.
     """
+    logger.debug("FFmpeg command: %s", " ".join(ffmpeg_arguments))
     try:
         result = subprocess.run(
             ffmpeg_arguments,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError:
@@ -99,9 +102,10 @@ def run_ffmpeg_command(ffmpeg_arguments: list[str]) -> None:
         )
 
     if result.returncode != 0:
+        logger.error("FFmpeg failed (exit %d): %s", result.returncode, result.stderr[-500:])
         raise VideoSegmentCuttingError(
             f"FFmpeg failed with exit code {result.returncode}.\n"
-            f"stderr: {result.stderr[-2000:]}"  # last 2000 chars of ffmpeg output
+            f"stderr: {result.stderr[-2000:]}"
         )
 
 

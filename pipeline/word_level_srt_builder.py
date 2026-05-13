@@ -146,6 +146,7 @@ def build_cleaned_speech_regions(
     )
 
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 

@@ -15,11 +15,14 @@ Flow:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 import srt
+
+logger = logging.getLogger(__name__)
 
 from pipeline.silence_detection import (
     detect_silence_regions,
@@ -50,6 +53,7 @@ def merge_bilingual_subtitles(
     (list of dicts with 'text', 'StartTime', 'EndTime' in milliseconds).
     """
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 

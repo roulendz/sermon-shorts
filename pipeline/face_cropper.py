@@ -278,6 +278,13 @@ def crop_segment_to_portrait(
         speed_multiplier=speed_multiplier,
     )
 
+    logger.info(
+        "Portrait crop: %s → %s (start=%.1fs, dur=%.1fs, speed=%.1fx)",
+        source_video_path.name, output_file_path.name,
+        start_seconds, duration_seconds, speed_multiplier,
+    )
+    logger.debug("FFmpeg command: %s", " ".join(ffmpeg_arguments))
+
     ffmpeg_process = subprocess.Popen(
         ffmpeg_arguments,
         stdin=subprocess.PIPE,
@@ -313,6 +320,7 @@ def crop_segment_to_portrait(
             crop_x_start = tracker.update(body_center_x, facing_direction)
 
             cropped_frame = frame[:, crop_x_start : crop_x_start + crop_width]
+
             if not cropped_frame.flags["C_CONTIGUOUS"]:
                 cropped_frame = np.ascontiguousarray(cropped_frame)
 
@@ -403,6 +411,13 @@ def generate_debug_video(
         "-shortest",
         str(output_file_path),
     ]
+
+    logger.info(
+        "Debug video: %s → %s (start=%.1fs, dur=%.1fs)",
+        source_video_path.name, output_file_path.name,
+        start_seconds, duration_seconds,
+    )
+    logger.debug("FFmpeg command: %s", " ".join(ffmpeg_arguments))
 
     ffmpeg_process = subprocess.Popen(
         ffmpeg_arguments,

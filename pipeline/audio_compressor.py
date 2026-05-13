@@ -8,9 +8,12 @@ Audio format conversion for transcription services.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 COMPRESSION_THRESHOLD_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -24,13 +27,18 @@ def _run_ffmpeg_conversion(
     ffmpeg_arguments: list[str],
     output_file_path: Path,
 ) -> None:
+    logger.debug("FFmpeg command: %s", " ".join(ffmpeg_arguments))
     result = subprocess.run(
         ffmpeg_arguments,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
+        logger.error("FFmpeg conversion failed (exit %d): %s", result.returncode, result.stderr[-500:])
         raise RuntimeError(f"FFmpeg conversion failed: {result.stderr[-500:]}")
+    logger.info("FFmpeg conversion complete: %s", output_file_path)
 
 
 def _format_file_size_megabytes(file_path: Path) -> float:
@@ -47,6 +55,7 @@ def prepare_audio_with_offset(
     Caches as {stem}.offset.16k.wav.
     """
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 
@@ -95,6 +104,7 @@ def compress_audio_if_needed(
     Only converts files above 50 MB.
     """
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 
@@ -141,6 +151,7 @@ def compress_audio_for_transkriptor(
     Caches as {stem}.transkriptor.mp3.
     """
     def _log(message: str) -> None:
+        logger.info(message)
         if on_progress:
             on_progress(message)
 

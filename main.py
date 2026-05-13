@@ -5,6 +5,9 @@ main.py — Entry point for the Sermon Shorts pipeline TUI.
 from dotenv import load_dotenv
 load_dotenv()
 
+from pipeline.logging_config import configure_file_logging
+configure_file_logging()
+
 from textual.app import App
 
 from models.pipeline_state import PipelineState
