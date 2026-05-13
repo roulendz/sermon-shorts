@@ -10,15 +10,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pipeline.logging_config import configure_file_logging
+configure_file_logging()
+
 from pipeline.face_cropper import crop_segment_to_portrait, build_portrait_output_path
 from pipeline.silence_remover import remove_silence_from_video, build_silence_removed_output_path
+from pipeline.bottom_overlay import apply_bottom_overlay, build_square_output_path
+from pipeline.video_probe import probe_duration_seconds
 
 CLIPS_DIRECTORY = Path(r"I:\2026-05-03 Dievs meklē sēklu\clips\v4-2026-05-10")
 MODEL_DIRECTORY = Path("D:/sermon-shorts/.models")
 SPEED_MULTIPLIER = 1.3
 SILENCE_MINIMUM_DURATION = 1.0
+OVERLAY_HEIGHT = 695
+COLOR_SAMPLE_OFFSET_X = 100
+COLOR_SAMPLE_OFFSET_Y = 1300
 
-TAG_PATTERN = re.compile(r"\[(?:portrait|debug|trimmed|portrait-[\d.]+x)\]")
+TAG_PATTERN = re.compile(r"\[(?:portrait|debug|trimmed|square|portrait-[\d.]+x)\]")
 
 
 def is_landscape_source(file_path: Path) -> bool:
@@ -26,12 +34,7 @@ def is_landscape_source(file_path: Path) -> bool:
 
 
 def get_duration(video_path: Path) -> float:
-    import subprocess
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)],
-        capture_output=True, text=True,
-    )
-    return float(result.stdout.strip())
+    return probe_duration_seconds(video_path)
 
 
 def main():
@@ -49,28 +52,50 @@ def main():
         print(f"[{index}/{len(source_clips)}] {clip_path.name} ({duration:.0f}s)")
 
         portrait_path = build_portrait_output_path(clip_path)
+        trimmed_path = build_silence_removed_output_path(portrait_path)
+        square_path = build_square_output_path(trimmed_path)
 
         try:
-            print(f"  Portrait cropping (speed={SPEED_MULTIPLIER}x)...")
-            crop_segment_to_portrait(
-                source_video_path=clip_path,
-                output_file_path=portrait_path,
-                start_seconds=0.0,
-                duration_seconds=duration,
-                model_directory=MODEL_DIRECTORY,
-                speed_multiplier=SPEED_MULTIPLIER,
-                on_progress=lambda p: print(f"    {p:.0f}%", end="\r") if int(p) % 20 == 0 else None,
-            )
-            print(f"  Portrait done: {portrait_path.name}")
+            if portrait_path.exists():
+                print(f"  Portrait exists, skipping: {portrait_path.name}")
+            else:
+                print(f"  Portrait cropping (speed={SPEED_MULTIPLIER}x)...")
+                crop_segment_to_portrait(
+                    source_video_path=clip_path,
+                    output_file_path=portrait_path,
+                    start_seconds=0.0,
+                    duration_seconds=duration,
+                    model_directory=MODEL_DIRECTORY,
+                    speed_multiplier=SPEED_MULTIPLIER,
+                    on_progress=lambda p: print(f"    {p:.0f}%", end="\r") if int(p) % 20 == 0 else None,
+                )
+                print(f"  Portrait done: {portrait_path.name}")
 
-            print(f"  Removing silence (>{SILENCE_MINIMUM_DURATION}s)...")
-            trimmed_path = build_silence_removed_output_path(portrait_path)
-            remove_silence_from_video(
-                source_video_path=portrait_path,
-                output_file_path=trimmed_path,
-                minimum_duration_seconds=SILENCE_MINIMUM_DURATION,
-                on_progress=lambda msg: print(f"    {msg}"),
-            )
+            if trimmed_path.exists():
+                print(f"  Trimmed exists, skipping: {trimmed_path.name}")
+            else:
+                print(f"  Removing silence (>{SILENCE_MINIMUM_DURATION}s)...")
+                remove_silence_from_video(
+                    source_video_path=portrait_path,
+                    output_file_path=trimmed_path,
+                    minimum_duration_seconds=SILENCE_MINIMUM_DURATION,
+                    on_progress=lambda msg: print(f"    {msg}"),
+                )
+
+            if square_path.exists():
+                print(f"  Square exists, skipping: {square_path.name}")
+            else:
+                print(f"  Adding bottom overlay ({OVERLAY_HEIGHT}px)...")
+                apply_bottom_overlay(
+                    source_video_path=trimmed_path,
+                    output_file_path=square_path,
+                    landscape_video_path=clip_path,
+                    overlay_height=OVERLAY_HEIGHT,
+                    color_sample_offset_x=COLOR_SAMPLE_OFFSET_X,
+                    color_sample_offset_y=COLOR_SAMPLE_OFFSET_Y,
+                    on_progress=lambda p: print(f"    {p:.0f}%", end="\r") if int(p) % 20 == 0 else None,
+                )
+                print(f"  Square done: {square_path.name}")
 
             clip_elapsed = time.time() - clip_start
             results.append((clip_path.name, duration, clip_elapsed, True))
