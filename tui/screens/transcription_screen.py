@@ -48,17 +48,9 @@ class TranscriptionScreen(Screen):
         text-style: bold;
         margin-bottom: 1;
     }
-    #choice-row {
+    #button-row {
         height: 3;
-        margin-bottom: 1;
-    }
-    #service-row {
-        height: 3;
-        margin-bottom: 1;
-    }
-    #proceed-button {
-        margin-top: 2;
-        width: 100%;
+        margin-top: 1;
     }
     """
 
@@ -79,7 +71,8 @@ class TranscriptionScreen(Screen):
             )
             yield Rule()
             yield Label("", id="existing-data-notice")
-            with Horizontal(id="choice-row"):
+            yield PipelineLog(id="transcription-log")
+            with Horizontal(id="button-row"):
                 yield Button(
                     "Use Existing",
                     id="use-existing-button",
@@ -92,7 +85,6 @@ class TranscriptionScreen(Screen):
                     variant="warning",
                     disabled=True,
                 )
-            with Horizontal(id="service-row"):
                 yield Button(
                     "WhisperX Word-Level (LV+RU)",
                     id="whisperx-wordlevel-button",
@@ -103,13 +95,12 @@ class TranscriptionScreen(Screen):
                     id="transkriptor-button",
                     variant="default",
                 )
-            yield PipelineLog(id="transcription-log")
-            yield Button(
-                "Proceed to Segment Selection ->",
-                id="proceed-button",
-                variant="primary",
-                disabled=True,
-            )
+                yield Button(
+                    "Proceed to Segment Selection ->",
+                    id="proceed-button",
+                    variant="primary",
+                    disabled=True,
+                )
         yield Footer()
 
     def on_mount(self) -> None:

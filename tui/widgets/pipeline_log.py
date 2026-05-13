@@ -19,8 +19,12 @@ class PipelineLog(Log):
     DEFAULT_CSS = """
     PipelineLog {
         border: solid $primary-darken-2;
-        height: 12;
+        min-height: 10;
+        height: 1fr;
+        max-height: 100%;
         background: $surface-darken-1;
+        scrollbar-color: $primary;
+        scrollbar-color-hover: $primary-lighten-2;
     }
     """
 
