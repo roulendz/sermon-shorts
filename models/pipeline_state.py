@@ -25,11 +25,13 @@ class PipelineState:
     whisperx_version: Optional[int] = None
 
     # ── Set after Manus segment selection ────────────────────────────────────
+    manus_task_id: Optional[str] = None
     selected_segments: list[VideoSegment] = field(default_factory=list)
 
     # ── Cutting options — set before cutting begins ────────────────────────────
     enable_portrait_crop: bool = True
     portrait_speed_multiplier: float = 1.3
+    portrait_overlay_height: int = 695
     remove_silence: bool = True
     silence_minimum_duration_seconds: float = 1.0
 

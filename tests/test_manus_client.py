@@ -16,6 +16,22 @@ FAKE_API_KEY = "manus-test-key-99999"
 SAMPLE_PROMPT = "Select the best sermon segments from this SRT file."
 SAMPLE_RESPONSE_TEXT = '{"title": "Test", "segments": []}'
 
+COMPLETED_TASK_WITH_OUTPUT = {
+    "status": "completed",
+    "output": [
+        {
+            "content": [
+                {"text": SAMPLE_RESPONSE_TEXT}
+            ]
+        }
+    ],
+}
+
+COMPLETED_TASK_EMPTY_OUTPUT = {
+    "status": "completed",
+    "output": [],
+}
+
 
 @pytest.fixture
 def manus_client() -> ManusClient:
@@ -28,10 +44,7 @@ def test_submit_prompt_returns_response_text_when_task_completes(manus_client: M
         return_value=httpx.Response(200, json={"task_id": "task-xyz-001"})
     )
     respx.get(f"{MANUS_API_BASE_URL}/tasks/task-xyz-001").mock(
-        return_value=httpx.Response(
-            200,
-            json={"status": "completed", "result": SAMPLE_RESPONSE_TEXT},
-        )
+        return_value=httpx.Response(200, json=COMPLETED_TASK_WITH_OUTPUT)
     )
 
     result = manus_client.submit_prompt_and_wait_for_response(SAMPLE_PROMPT)
@@ -70,10 +83,10 @@ def test_submit_prompt_raises_when_completed_response_has_no_result(manus_client
         return_value=httpx.Response(200, json={"task_id": "task-empty-003"})
     )
     respx.get(f"{MANUS_API_BASE_URL}/tasks/task-empty-003").mock(
-        return_value=httpx.Response(200, json={"status": "completed"})
+        return_value=httpx.Response(200, json=COMPLETED_TASK_EMPTY_OUTPUT)
     )
 
-    with pytest.raises(ManusTaskError, match="no response"):
+    with pytest.raises(ManusTaskError, match="no text found"):
         manus_client.submit_prompt_and_wait_for_response(SAMPLE_PROMPT)
 
 
@@ -88,10 +101,7 @@ def test_submit_prompt_sends_api_key_in_header(manus_client: ManusClient):
 
     respx.post(f"{MANUS_API_BASE_URL}/tasks").mock(side_effect=capture_request)
     respx.get(f"{MANUS_API_BASE_URL}/tasks/task-header-check").mock(
-        return_value=httpx.Response(
-            200,
-            json={"status": "completed", "result": SAMPLE_RESPONSE_TEXT},
-        )
+        return_value=httpx.Response(200, json=COMPLETED_TASK_WITH_OUTPUT)
     )
 
     manus_client.submit_prompt_and_wait_for_response(SAMPLE_PROMPT)
@@ -111,10 +121,7 @@ def test_submit_prompt_includes_prompt_in_request_body(manus_client: ManusClient
 
     respx.post(f"{MANUS_API_BASE_URL}/tasks").mock(side_effect=capture_request)
     respx.get(f"{MANUS_API_BASE_URL}/tasks/task-body-check").mock(
-        return_value=httpx.Response(
-            200,
-            json={"status": "completed", "result": SAMPLE_RESPONSE_TEXT},
-        )
+        return_value=httpx.Response(200, json=COMPLETED_TASK_WITH_OUTPUT)
     )
 
     manus_client.submit_prompt_and_wait_for_response(SAMPLE_PROMPT)
