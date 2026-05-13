@@ -17,7 +17,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Rule, Static
+from textual.widgets import Button, Footer, Header, Input, Label, RadioButton, RadioSet, Rule, Static
 from textual import work
 
 from models.pipeline_state import PipelineState
@@ -113,8 +113,62 @@ class SegmentReviewScreen(Screen):
         color: $text-muted;
         margin-bottom: 1;
     }
-    #selection-log {
+    #main-columns {
+        height: auto;
         margin-bottom: 1;
+    }
+    #source-container {
+        width: 1fr;
+        height: auto;
+        padding: 1;
+        border: solid $primary-darken-2;
+    }
+    #source-label {
+        text-style: bold;
+        margin-bottom: 0;
+    }
+    #source-radio {
+        height: auto;
+        margin-top: 0;
+    }
+    .inline-field {
+        height: 3;
+        margin-top: 0;
+    }
+    .inline-field Label {
+        width: auto;
+        padding: 1 1 0 0;
+    }
+    .inline-field Input {
+        width: 1fr;
+    }
+    #resume-task-button {
+        width: 100%;
+    }
+    #action-container {
+        width: 1fr;
+        height: auto;
+        padding: 1;
+        margin-left: 1;
+        border: solid $warning-darken-1;
+    }
+    #action-label {
+        text-style: bold;
+        color: $warning;
+        margin-bottom: 0;
+    }
+    #use-selected-button {
+        width: 100%;
+        margin-top: 1;
+    }
+    #new-manus-button {
+        width: 100%;
+        margin-top: 0;
+    }
+    #selection-log {
+        margin-top: 1;
+        height: 7;
+        max-height: 7;
     }
     #segments-scroll-container {
         height: auto;
@@ -124,64 +178,61 @@ class SegmentReviewScreen(Screen):
         margin-top: 1;
         width: 100%;
     }
-    #task-resume-row {
-        height: auto;
-        margin-bottom: 1;
-    }
-    #task-url-input {
-        width: 1fr;
-    }
-    #resume-task-button {
-        width: auto;
-        min-width: 20;
-    }
     """
 
     def __init__(self, pipeline_state: PipelineState) -> None:
         super().__init__()
         self._pipeline_state = pipeline_state
-        self._existing_manus_response_path: Path | None = None
+        self._source_entries: list[dict] = []
+        self._selected_source_index: int = -1
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
             yield Label("Step 3 — Segment Review", id="screen-title")
             yield Label(
-                "Manus AI is selecting the best segments from your sermon...",
+                "Select a Manus response or request new analysis",
                 id="screen-subtitle",
             )
-            with Horizontal(id="manus-choice-row"):
-                yield Button(
-                    "Use Previous Manus Response",
-                    id="use-existing-manus-button",
-                    variant="success",
-                    disabled=True,
-                )
-                yield Button(
-                    "Request New Analysis",
-                    id="new-manus-button",
-                    variant="warning",
-                    disabled=True,
-                )
-            with Horizontal(id="task-resume-row"):
-                yield Input(
-                    placeholder="Paste Manus task URL or ID to resume...",
-                    id="task-url-input",
-                )
-                yield Button(
-                    "Resume Task",
-                    id="resume-task-button",
-                    variant="default",
-                )
-            yield PipelineLog(id="selection-log")
+            yield Rule()
+            with Horizontal(id="main-columns"):
+                with Vertical(id="source-container"):
+                    yield Label("Available Responses", id="source-label")
+                    yield RadioSet(id="source-radio")
+                    yield Rule()
+                    with Horizontal(classes="inline-field"):
+                        yield Label("URL/ID:")
+                        yield Input(
+                            placeholder="Paste Manus task URL or ID...",
+                            id="task-url-input",
+                        )
+                    yield Button(
+                        "Resume Task from URL",
+                        id="resume-task-button",
+                        variant="default",
+                    )
+                with Vertical(id="action-container"):
+                    yield Label("Actions", id="action-label")
+                    yield Button(
+                        "Use Selected Response",
+                        id="use-selected-button",
+                        variant="success",
+                        disabled=True,
+                    )
+                    yield Button(
+                        "Request New Analysis",
+                        id="new-manus-button",
+                        variant="warning",
+                    )
+                    yield PipelineLog(id="selection-log")
+                    yield Button(
+                        "Cut Videos ->",
+                        id="cut-videos-button",
+                        variant="primary",
+                        disabled=True,
+                    )
             yield Rule()
             yield ScrollableContainer(id="segments-scroll-container")
-            yield Button(
-                "Cut Videos ->",
-                id="cut-videos-button",
-                variant="primary",
-                disabled=True,
-            )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -194,28 +245,7 @@ class SegmentReviewScreen(Screen):
                 self._proceed_to_cutting_screen()
             return
 
-        # Show registered tasks and find best candidate for resume
-        best_candidate_task_id = self._display_task_registry()
-
-        # Check for existing Manus response JSON and auto-load it
-        existing_response_path = self._find_existing_manus_response()
-        if existing_response_path:
-            self._existing_manus_response_path = existing_response_path
-            self._log_widget.write_info(
-                f"Found previous Manus response: {existing_response_path.name}"
-            )
-            self.query_one("#screen-subtitle", Label).update(
-                "Loading previous Manus response..."
-            )
-            # Keep "Request New Analysis" enabled so user can override if auto-load fails
-            self.query_one("#new-manus-button", Button).disabled = False
-            # Auto-load the cached response instead of waiting for button click
-            self._load_existing_manus_response()
-        else:
-            self.query_one("#use-existing-manus-button", Button).display = False
-            self.query_one("#new-manus-button", Button).display = False
-            if not best_candidate_task_id:
-                self._run_segment_selection()
+        self._populate_source_list()
 
     @work(thread=True)
     def _run_segment_selection(self) -> None:
@@ -312,35 +342,83 @@ class SegmentReviewScreen(Screen):
         )
         self.query_one("#cut-videos-button", Button).disabled = False
 
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        if event.radio_set.id == "source-radio":
+            self._selected_source_index = event.index
+            self.query_one("#use-selected-button", Button).disabled = False
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "use-existing-manus-button":
-            self.query_one("#use-existing-manus-button", Button).disabled = True
-            self.query_one("#new-manus-button", Button).disabled = True
-            self._load_existing_manus_response()
+        if event.button.id == "use-selected-button":
+            self._use_selected_source()
         elif event.button.id == "new-manus-button":
-            self.query_one("#use-existing-manus-button", Button).disabled = True
-            self.query_one("#new-manus-button", Button).disabled = True
+            self._disable_source_controls()
             self._run_segment_selection()
         elif event.button.id == "resume-task-button":
             task_url_or_id = self.query_one("#task-url-input", Input).value.strip()
             if not task_url_or_id:
                 self._log_widget.write_error("Enter a Manus task URL or ID first")
                 return
-            self.query_one("#resume-task-button", Button).disabled = True
+            self._disable_source_controls()
             self._resume_manus_task(task_url_or_id)
         elif event.button.id == "cut-videos-button":
             self._proceed_to_cutting_screen()
 
-    def _find_existing_manus_response(self) -> Path | None:
-        """Look for saved Manus response JSON next to the video file."""
+    def _populate_source_list(self) -> None:
+        """Find all cached Manus responses and task history, populate radio buttons."""
+        radio_set = self.query_one("#source-radio", RadioSet)
+        self._source_entries = []
+
+        cached_files = self._find_all_manus_responses()
+        for response_path in cached_files:
+            size_kilobytes = response_path.stat().st_size // 1024
+            label = f"{response_path.stem} ({size_kilobytes}KB)"
+            self._source_entries.append({"type": "file", "path": response_path})
+            radio_set.mount(RadioButton(label))
+
+        tasks = self._load_task_registry()
+        for task in reversed(tasks):
+            task_id = task.get("task_id", "?")
+            status = task.get("status", "unknown")
+            submitted = task.get("submitted_at", "")[:16]
+            has_cached_file = any(
+                entry.get("type") == "file" for entry in self._source_entries
+            )
+            if status == "completed" and has_cached_file:
+                continue
+            label = f"[{status}] {task_id[:16]}... {submitted}"
+            self._source_entries.append({"type": "task", "task_id": task_id})
+            radio_set.mount(RadioButton(label))
+
+        if not self._source_entries:
+            self._log_widget.write_info("No existing Manus responses found")
+
+    def _use_selected_source(self) -> None:
+        """Load segments from whatever source the user selected in the radio."""
+        if self._selected_source_index < 0 or self._selected_source_index >= len(self._source_entries):
+            self._log_widget.write_error("Select a response first")
+            return
+        entry = self._source_entries[self._selected_source_index]
+        self._disable_source_controls()
+        if entry["type"] == "file":
+            self._load_manus_response_from_file(entry["path"])
+        elif entry["type"] == "task":
+            self._resume_manus_task(entry["task_id"])
+
+    def _disable_source_controls(self) -> None:
+        """Disable all source selection controls once an action is chosen."""
+        self.query_one("#use-selected-button", Button).disabled = True
+        self.query_one("#new-manus-button", Button).disabled = True
+        self.query_one("#resume-task-button", Button).disabled = True
+
+    def _find_all_manus_responses(self) -> list[Path]:
+        """Find all saved Manus response JSON files next to the video file."""
         if not self._pipeline_state.video_file_path:
-            return None
+            return []
         video_directory = self._pipeline_state.video_file_path.parent
-        matching_files = sorted(
+        return sorted(
             video_directory.glob("manus_response_*.json"),
             reverse=True,
         )
-        return matching_files[0] if matching_files else None
 
     def _save_manus_response(self, response_text: str) -> None:
         """Save Manus raw response to JSON file for reuse."""
@@ -353,16 +431,16 @@ class SegmentReviewScreen(Screen):
         logger.info(f"Manus response saved: {output_path}")
 
     @work(thread=True)
-    def _load_existing_manus_response(self) -> None:
-        """Load segments from a previously saved Manus response."""
+    def _load_manus_response_from_file(self, response_path: Path) -> None:
+        """Load segments from a previously saved Manus response file."""
         from pipeline.segment_selector import parse_segments_from_manus_response
         from pipeline.subtitle_parser import load_subtitle_file
 
         log = self._log_widget
-        response_path = self._existing_manus_response_path
 
         try:
-            self.app.call_from_thread(log.write_info, f"Loading: {response_path.name}")
+            self.app.call_from_thread(log.write_step_header, "Loading Cached Response")
+            self.app.call_from_thread(log.write_info, f"File: {response_path.name}")
             try:
                 response_text = response_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
@@ -370,7 +448,7 @@ class SegmentReviewScreen(Screen):
 
             self.app.call_from_thread(
                 log.write_info,
-                f"Response file size: {len(response_text)} characters",
+                f"Response size: {len(response_text)} characters",
             )
 
             all_subtitles = load_subtitle_file(self._pipeline_state.subtitle_file_path)
@@ -384,15 +462,11 @@ class SegmentReviewScreen(Screen):
 
             self.app.call_from_thread(
                 log.write_success,
-                f"Loaded {len(segments)} segments from previous response",
+                f"Loaded {len(segments)} segments from cached response",
             )
             self.app.call_from_thread(self._display_segments, segments)
 
             if self._pipeline_state.auto_segment_review:
-                self.app.call_from_thread(
-                    log.write_info,
-                    "Auto review enabled -- proceeding to cutting automatically",
-                )
                 self.app.call_from_thread(self._proceed_to_cutting_screen)
 
         except Exception as error:
@@ -400,14 +474,15 @@ class SegmentReviewScreen(Screen):
             self.app.call_from_thread(
                 log.write_error, f"Failed to load cached response: {error}"
             )
-            self.app.call_from_thread(self._enable_manual_fallback_buttons)
+            self.app.call_from_thread(self._re_enable_source_controls)
 
-    def _enable_manual_fallback_buttons(self) -> None:
-        """Re-enable action buttons after auto-load fails so user can retry or request new."""
-        self.query_one("#use-existing-manus-button", Button).disabled = False
+    def _re_enable_source_controls(self) -> None:
+        """Re-enable all source selection controls after a failure."""
+        self.query_one("#use-selected-button", Button).disabled = (self._selected_source_index < 0)
         self.query_one("#new-manus-button", Button).disabled = False
+        self.query_one("#resume-task-button", Button).disabled = False
         self.query_one("#screen-subtitle", Label).update(
-            "Auto-load failed -- click 'Use Previous' to retry or 'Request New Analysis'"
+            "Load failed -- select another response or request new analysis"
         )
 
     @work(thread=True)
@@ -450,11 +525,8 @@ class SegmentReviewScreen(Screen):
             self.app.call_from_thread(self._display_segments, segments)
 
         except Exception as error:
-            error_message = str(error)
-            def _handle_resume_error() -> None:
-                log.write_error(error_message)
-                self.query_one("#resume-task-button", Button).disabled = False
-            self.app.call_from_thread(_handle_resume_error)
+            self.app.call_from_thread(log.write_error, str(error))
+            self.app.call_from_thread(self._re_enable_source_controls)
 
     @staticmethod
     def _extract_task_id_from_url(url_or_id: str) -> str:
@@ -514,39 +586,6 @@ class SegmentReviewScreen(Screen):
                 task["status"] = status
                 break
         self._save_task_registry(tasks)
-
-    def _display_task_registry(self) -> str | None:
-        """Show registered tasks in the log. Returns best candidate task ID for resume."""
-        tasks = self._load_task_registry()
-        if not tasks:
-            return None
-
-        log = self._log_widget
-        log.write_step_header("Manus Task History")
-
-        has_response_files = bool(self._find_existing_manus_response())
-        best_candidate = None
-
-        for task in reversed(tasks):
-            task_id = task.get("task_id", "?")
-            status = task.get("status", "unknown")
-            submitted = task.get("submitted_at", "")[:16]
-            marker = ""
-
-            if status in ("running", "completed") and not has_response_files:
-                if not best_candidate:
-                    best_candidate = task_id
-                    marker = " <- resume this"
-
-            task_url = f"https://manus.im/app/{task_id}"
-            log.write_info(f"  [{status}] {task_id} -- {submitted}{marker}")
-            log.write_info(f"    URL: {task_url}")
-
-        if best_candidate:
-            self.query_one("#task-url-input", Input).value = best_candidate
-            log.write_info(f"Auto-selected task for resume: {best_candidate}")
-
-        return best_candidate
 
     def _proceed_to_cutting_screen(self) -> None:
         from tui.screens.cutting_screen import CuttingScreen
