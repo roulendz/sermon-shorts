@@ -11,3 +11,8 @@ logs/
 .claude/
 .models/
 .planning/
+.swatches
+manus_tasks.json
+manus_pending_task.json
+manus_response_*.json
+test_overlay_*.png
