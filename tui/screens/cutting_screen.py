@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -53,9 +53,13 @@ class CuttingScreen(Screen):
         color: $text-muted;
         margin-bottom: 1;
     }
-    #options-container {
+    #main-columns {
         height: auto;
         margin-bottom: 1;
+    }
+    #options-container {
+        width: 1fr;
+        height: auto;
         padding: 1;
         border: solid $primary-darken-2;
     }
@@ -63,13 +67,25 @@ class CuttingScreen(Screen):
         text-style: bold;
         margin-bottom: 0;
     }
-    #existing-clips-container {
+    .inline-field {
+        height: 3;
+        margin-top: 0;
+    }
+    .inline-field Label {
+        width: auto;
+        padding: 1 1 0 0;
+    }
+    .inline-field Input {
+        width: 1fr;
+    }
+    #action-container {
+        width: 1fr;
         height: auto;
-        margin-bottom: 1;
         padding: 1;
+        margin-left: 1;
         border: solid $warning-darken-1;
     }
-    #existing-clips-label {
+    #action-label {
         text-style: bold;
         color: $warning;
         margin-bottom: 0;
@@ -79,16 +95,16 @@ class CuttingScreen(Screen):
         height: auto;
     }
     #use-existing-button {
-        margin-top: 1;
         width: 100%;
+        margin-top: 1;
     }
     #recut-button {
-        margin-top: 0;
         width: 100%;
+        margin-top: 0;
     }
     #start-cutting-button {
-        margin-top: 1;
         width: 100%;
+        margin-top: 1;
     }
     #done-label {
         text-style: bold;
@@ -117,53 +133,63 @@ class CuttingScreen(Screen):
                 id="screen-subtitle",
             )
             yield Rule()
-            with Vertical(id="options-container"):
-                yield Label("Output Options", id="options-label")
-                yield Checkbox(
-                    "Crop to 9:16 portrait with face tracking (TikTok / Shorts / Reels)",
-                    value=self._pipeline_state.enable_portrait_crop,
-                    id="portrait-crop-checkbox",
-                )
-                yield Checkbox(
-                    "Generate debug overlay video (shows tracking data on original)",
-                    value=False,
-                    id="debug-overlay-checkbox",
-                )
-                yield Label("Playback speed multiplier (1.0 = normal):")
-                yield Input(
-                    value=str(self._pipeline_state.portrait_speed_multiplier),
-                    placeholder="1.3",
-                    id="speed-multiplier-input",
-                )
-                yield Checkbox(
-                    "Remove silences from portrait output",
-                    value=self._pipeline_state.remove_silence,
-                    id="remove-silence-checkbox",
-                )
-                yield Label("Minimum silence duration to cut (seconds):")
-                yield Input(
-                    value=str(self._pipeline_state.silence_minimum_duration_seconds),
-                    placeholder="1.0",
-                    id="silence-duration-input",
-                )
-            with Vertical(id="existing-clips-container"):
-                yield Label("Existing Clips Found", id="existing-clips-label")
-                yield RadioSet(id="existing-clips-radio")
-                yield Button(
-                    "Use Existing Clips",
-                    id="use-existing-button",
-                    variant="warning",
-                )
-                yield Button(
-                    "Recut (new folder)",
-                    id="recut-button",
-                    variant="default",
-                )
-            yield Button(
-                "Start Cutting",
-                id="start-cutting-button",
-                variant="primary",
-            )
+            with Horizontal(id="main-columns"):
+                with Vertical(id="options-container"):
+                    yield Label("Output Options", id="options-label")
+                    yield Checkbox(
+                        "Portrait 9:16 crop with face tracking",
+                        value=self._pipeline_state.enable_portrait_crop,
+                        id="portrait-crop-checkbox",
+                    )
+                    yield Checkbox(
+                        "Debug overlay (tracking data on original)",
+                        value=False,
+                        id="debug-overlay-checkbox",
+                    )
+                    with Horizontal(classes="inline-field"):
+                        yield Label("Speed:")
+                        yield Input(
+                            value=str(self._pipeline_state.portrait_speed_multiplier),
+                            placeholder="1.3",
+                            id="speed-multiplier-input",
+                        )
+                    with Horizontal(classes="inline-field"):
+                        yield Label("Overlay px:")
+                        yield Input(
+                            value=str(self._pipeline_state.portrait_overlay_height),
+                            placeholder="695",
+                            id="overlay-height-input",
+                        )
+                    yield Checkbox(
+                        "Remove silences from portrait",
+                        value=self._pipeline_state.remove_silence,
+                        id="remove-silence-checkbox",
+                    )
+                    with Horizontal(classes="inline-field"):
+                        yield Label("Min silence:")
+                        yield Input(
+                            value=str(self._pipeline_state.silence_minimum_duration_seconds),
+                            placeholder="1.0",
+                            id="silence-duration-input",
+                        )
+                with Vertical(id="action-container"):
+                    yield Label("Existing Clips Found", id="action-label")
+                    yield RadioSet(id="existing-clips-radio")
+                    yield Button(
+                        "Use Existing Clips",
+                        id="use-existing-button",
+                        variant="warning",
+                    )
+                    yield Button(
+                        "Recut All Segments (new folder)",
+                        id="recut-button",
+                        variant="error",
+                    )
+                    yield Button(
+                        "Start Cutting",
+                        id="start-cutting-button",
+                        variant="primary",
+                    )
             yield Rule()
             yield PipelineLog(id="cutting-log")
             yield Label("", id="done-label")
@@ -179,21 +205,24 @@ class CuttingScreen(Screen):
         self._log_widget = self.query_one("#cutting-log", PipelineLog)
         self._existing_clip_directories = self._find_existing_clip_directories()
 
-        existing_container = self.query_one("#existing-clips-container")
+        action_label = self.query_one("#action-label", Label)
+        radio_set = self.query_one("#existing-clips-radio", RadioSet)
+        use_existing_button = self.query_one("#use-existing-button", Button)
+        recut_button = self.query_one("#recut-button", Button)
         start_button = self.query_one("#start-cutting-button", Button)
 
         if self._existing_clip_directories:
-            start_button.display = False
-            radio_set = self.query_one("#existing-clips-radio", RadioSet)
             for clip_directory in self._existing_clip_directories:
                 all_mp4s = list(clip_directory.glob("*.mp4"))
                 mp4_count = len([p for p in all_mp4s if "[portrait]" not in p.name and "[debug]" not in p.name])
                 label = f"{clip_directory.name}/ ({mp4_count} clips)"
                 radio_set.mount(RadioButton(label))
-            if self._existing_clip_directories:
-                self._selected_existing_directory = self._existing_clip_directories[0]
+            self._selected_existing_directory = self._existing_clip_directories[0]
         else:
-            existing_container.display = False
+            action_label.update("Actions")
+            radio_set.display = False
+            use_existing_button.display = False
+            recut_button.display = False
 
         if self._pipeline_state.auto_video_cutting and not self._existing_clip_directories:
             self._begin_cutting()
@@ -218,6 +247,13 @@ class CuttingScreen(Screen):
                 value = float(event.value)
                 if 0.5 <= value <= 3.0:
                     self._pipeline_state.portrait_speed_multiplier = value
+            except ValueError:
+                pass
+        elif event.input.id == "overlay-height-input":
+            try:
+                value = int(event.value)
+                if 0 <= value <= 1920:
+                    self._pipeline_state.portrait_overlay_height = value
             except ValueError:
                 pass
         elif event.input.id == "silence-duration-input":
@@ -325,8 +361,8 @@ class CuttingScreen(Screen):
             index=0,
             start_time=timedelta(seconds=0),
             end_time=timedelta(seconds=duration),
-            transcript_text="",
-            selection_reason="",
+            transcript_text="(existing clip)",
+            selection_reason="Reused from existing clips folder",
         )
 
     def _disable_all_controls(self) -> None:
@@ -551,8 +587,13 @@ class CuttingScreen(Screen):
                     f"Segment {segment.index} portrait crop failed: {error}",
                 )
 
+        overlay_input_paths = list(portrait_paths)
         if self._pipeline_state.remove_silence and portrait_paths:
-            self._run_silence_removal(portrait_paths)
+            trimmed_paths = self._run_silence_removal(portrait_paths)
+            if trimmed_paths:
+                overlay_input_paths = trimmed_paths
+
+        self._run_bottom_overlay(overlay_input_paths)
 
         total_segments = len(self._pipeline_state.selected_segments)
         self.app.call_from_thread(
@@ -616,6 +657,7 @@ class CuttingScreen(Screen):
                         log.write_info,
                         f"  Skipping (already exists): {portrait_output_path.name}",
                     )
+                    portrait_paths.append(portrait_output_path)
                     portrait_success_count += 1
                     continue
 
@@ -656,8 +698,13 @@ class CuttingScreen(Screen):
                     f"  Portrait crop failed for {clip_path.name}: {error}",
                 )
 
+        overlay_input_paths = list(portrait_paths)
         if self._pipeline_state.remove_silence and portrait_paths:
-            self._run_silence_removal(portrait_paths)
+            trimmed_paths = self._run_silence_removal(portrait_paths)
+            if trimmed_paths:
+                overlay_input_paths = trimmed_paths
+
+        self._run_bottom_overlay(overlay_input_paths)
 
         self.app.call_from_thread(
             self._show_completion_message,
@@ -666,7 +713,7 @@ class CuttingScreen(Screen):
             portrait_success_count,
         )
 
-    def _run_silence_removal(self, portrait_paths: list[Path]) -> None:
+    def _run_silence_removal(self, portrait_paths: list[Path]) -> list[Path]:
         from pipeline.silence_remover import (
             remove_silence_from_video,
             build_silence_removed_output_path,
@@ -675,6 +722,7 @@ class CuttingScreen(Screen):
 
         log = self._log_widget
         minimum_duration = self._pipeline_state.silence_minimum_duration_seconds
+        trimmed_paths: list[Path] = []
 
         self.app.call_from_thread(log.write_step_header, "Silence Removal")
         self.app.call_from_thread(
@@ -689,23 +737,113 @@ class CuttingScreen(Screen):
                 def on_silence_progress(message: str, name=portrait_path.stem):
                     self.app.call_from_thread(log.write_info, f"  {name}: {message}")
 
-                remove_silence_from_video(
+                result_path = remove_silence_from_video(
                     source_video_path=portrait_path,
                     output_file_path=output_path,
                     minimum_duration_seconds=minimum_duration,
                     on_progress=on_silence_progress,
                 )
+                trimmed_paths.append(result_path)
 
                 self.app.call_from_thread(
                     log.write_success,
-                    f"  Trimmed: {output_path.name}",
+                    f"  Trimmed: {result_path.name}",
                 )
 
             except SilenceRemovalError as error:
+                trimmed_paths.append(portrait_path)
                 self.app.call_from_thread(
                     log.write_error,
                     f"  Silence removal failed for {portrait_path.name}: {error}",
                 )
+
+        return trimmed_paths
+
+    def _run_bottom_overlay(self, source_paths: list[Path]) -> None:
+        from pipeline.bottom_overlay import (
+            apply_bottom_overlay,
+            build_square_output_path,
+            derive_landscape_clip_path,
+            BottomOverlayError,
+        )
+        from pipeline.video_cutter import (
+            cut_segment_from_video,
+            build_output_video_file_path,
+        )
+
+        log = self._log_widget
+
+        self.app.call_from_thread(log.write_step_header, "Bottom Overlay")
+        self.app.call_from_thread(
+            log.write_info,
+            f"Adding overlay to {len(source_paths)} clips (color from landscape clip)...",
+        )
+
+        for source_path in source_paths:
+            try:
+                output_path = build_square_output_path(source_path)
+
+                if output_path.exists():
+                    self.app.call_from_thread(
+                        log.write_info,
+                        f"  Skipping (exists): {output_path.name}",
+                    )
+                    continue
+
+                landscape_clip_path = derive_landscape_clip_path(source_path)
+                if not landscape_clip_path.exists():
+                    segment = self._find_segment_for_clip(landscape_clip_path)
+                    if segment is None:
+                        raise BottomOverlayError(
+                            f"Landscape clip missing and no matching segment: {landscape_clip_path.name}"
+                        )
+                    self.app.call_from_thread(
+                        log.write_info,
+                        f"  Cutting landscape clip: {landscape_clip_path.name}",
+                    )
+                    cut_segment_from_video(
+                        source_video_path=self._pipeline_state.video_file_path,
+                        segment=segment,
+                        output_file_path=landscape_clip_path,
+                    )
+
+                def on_overlay_progress(percent: float, name=source_path.stem):
+                    self.app.call_from_thread(
+                        log.write_info,
+                        f"  {name}: {percent:.0f}% encoded",
+                    )
+
+                apply_bottom_overlay(
+                    source_video_path=source_path,
+                    output_file_path=output_path,
+                    landscape_video_path=landscape_clip_path,
+                    overlay_height=self._pipeline_state.portrait_overlay_height,
+                    on_progress=on_overlay_progress,
+                )
+
+                self.app.call_from_thread(
+                    log.write_success,
+                    f"  Square: {output_path.name}",
+                )
+
+            except (BottomOverlayError, Exception) as error:
+                self.app.call_from_thread(
+                    log.write_error,
+                    f"  Overlay failed for {source_path.name}: {error}",
+                )
+
+    def _find_segment_for_clip(self, landscape_clip_path: Path) -> VideoSegment | None:
+        from pipeline.video_cutter import build_output_video_file_path
+
+        for segment in self._pipeline_state.selected_segments:
+            expected_path = build_output_video_file_path(
+                landscape_clip_path.parent,
+                segment,
+                self._pipeline_state.video_file_path,
+            )
+            if expected_path.name == landscape_clip_path.name:
+                return segment
+        return None
 
     def _save_segment_subtitles(
         self,
