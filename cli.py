@@ -28,6 +28,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Windows consoles default to cp1252 and crash print()/json.dumps on diacritics (ē/ā) or
+# Cyrillic. Force UTF-8 so the final receipt line never aborts an otherwise-successful run.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from dotenv import load_dotenv
 
 from models.video_segment import VideoSegment
