@@ -42,6 +42,25 @@ from models.video_segment import VideoSegment
 
 logger = logging.getLogger("sermon_shorts.cli")
 
+# House style: only a plain hyphen '-' - never an en/em dash. Manus sometimes returns a title or
+# description with a fancy dash, which would then land in a clip filename and the .md. Normalize
+# every text field on each selected segment before it becomes a filename/description.
+DASH_CHARACTERS = {"—": "-", "–": "-", "‒": "-", "―": "-", "−": "-"}
+
+
+def normalize_dashes(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    for dash_character, plain_hyphen in DASH_CHARACTERS.items():
+        text = text.replace(dash_character, plain_hyphen)
+    return text
+
+
+def normalize_segment_dashes(segment) -> None:
+    for attribute_name, attribute_value in list(vars(segment).items()):
+        if isinstance(attribute_value, str):
+            setattr(segment, attribute_name, normalize_dashes(attribute_value))
+
 REPOSITORY_ROOT = Path(__file__).resolve().parent
 POSE_MODEL_DIRECTORY = REPOSITORY_ROOT / ".models"
 
@@ -397,6 +416,8 @@ def select_segments(
             manus_response_path = save_manus_response(video_file_path, response_text)
 
     segments = parse_segments_from_manus_response(response_text, all_subtitles)
+    for segment in segments:
+        normalize_segment_dashes(segment)
     logger.info("Manus selected %d segments", len(segments))
     return segments, manus_response_path
 
