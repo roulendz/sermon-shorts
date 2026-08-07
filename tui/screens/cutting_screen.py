@@ -32,6 +32,8 @@ from textual import work
 
 from models.pipeline_state import PipelineState
 from models.video_segment import VideoSegment
+from pipeline.project_paths import clips_directory
+from tui.widgets.encoding_progress_panel import EncodingProgressPanel
 from tui.widgets.pipeline_log import PipelineLog
 
 
@@ -115,6 +117,13 @@ class CuttingScreen(Screen):
         margin-top: 1;
         width: 100%;
     }
+    #log-progress-columns {
+        height: 1fr;
+        min-height: 12;
+    }
+    #cutting-log {
+        width: 2fr;
+    }
     """
 
     def __init__(self, pipeline_state: PipelineState) -> None:
@@ -191,7 +200,9 @@ class CuttingScreen(Screen):
                         variant="primary",
                     )
             yield Rule()
-            yield PipelineLog(id="cutting-log")
+            with Horizontal(id="log-progress-columns"):
+                yield PipelineLog(id="cutting-log")
+                yield EncodingProgressPanel(id="encoding-progress")
             yield Label("", id="done-label")
             yield Button(
                 "Open Output Folder",
@@ -203,6 +214,7 @@ class CuttingScreen(Screen):
 
     def on_mount(self) -> None:
         self._log_widget = self.query_one("#cutting-log", PipelineLog)
+        self._progress_panel = self.query_one("#encoding-progress", EncodingProgressPanel)
         self._existing_clip_directories = self._find_existing_clip_directories()
 
         action_label = self.query_one("#action-label", Label)
@@ -276,7 +288,7 @@ class CuttingScreen(Screen):
 
     def _find_existing_clip_directories(self) -> list[Path]:
         """Find all existing clip directories that contain .mp4 files."""
-        clips_base = self._pipeline_state.video_file_path.parent / "clips"
+        clips_base = clips_directory(self._pipeline_state.video_file_path)
         if not clips_base.exists():
             return []
 
@@ -376,19 +388,71 @@ class CuttingScreen(Screen):
         except Exception:
             pass
 
+    def _notify_encoding_step(self, step_name: str, total_clips: int) -> None:
+        self.app.call_from_thread(
+            self._progress_panel.start_step, step_name, total_clips,
+        )
+
+    def _notify_encoding_start(self, clip_name: str, clip_number: int) -> None:
+        self.app.call_from_thread(
+            self._progress_panel.start_clip, clip_name, clip_number,
+        )
+
+    def _notify_encoding_progress(self, percent: float) -> None:
+        self.app.call_from_thread(
+            self._progress_panel.update_progress, percent,
+        )
+
+    def _notify_encoding_complete(self) -> None:
+        self.app.call_from_thread(self._progress_panel.finish_clip)
+
     def _begin_cutting(self) -> None:
         self._disable_all_controls()
         self._clips_directory = self._resolve_new_clips_directory()
         self._clips_directory.mkdir(parents=True, exist_ok=True)
         self._run_segment_cutting()
 
+    def _prepare_offset_audio_for_cutting(
+        self,
+        prepare_function,
+    ) -> dict[str, Path]:
+        log = self._log_widget
+        discovered_tracks = self._pipeline_state.discovered_audio_tracks
+
+        if not discovered_tracks:
+            return {}
+
+        from pipeline.language_detect import language_name
+
+        self.app.call_from_thread(
+            log.write_step_header,
+            "Preparing offset audio for cutting",
+        )
+
+        offset_audio_by_language: dict[str, Path] = {}
+        for language_code, audio_file_path in discovered_tracks.items():
+            def on_progress(message: str) -> None:
+                self.app.call_from_thread(log.write_info, message)
+
+            offset_path = prepare_function(
+                audio_file_path,
+                on_progress=on_progress,
+            )
+            offset_audio_by_language[language_code] = offset_path
+            self.app.call_from_thread(
+                log.write_info,
+                f"{language_name(language_code)} offset audio ready: {offset_path.name}",
+            )
+
+        return offset_audio_by_language
+
     def _resolve_new_clips_directory(self) -> Path:
         """
         Determine clips output directory with versioning.
-        First run:  {video_folder}/clips/
-        If /clips/ already has files: {video_folder}/clips/v2-YYYY-MM-DD/
+        First run:  {event}/Clips RAW/
+        If /Clips RAW/ already has files: {event}/Clips RAW/v2-YYYY-MM-DD/
         """
-        clips_base = self._pipeline_state.video_file_path.parent / "clips"
+        clips_base = clips_directory(self._pipeline_state.video_file_path)
         today = date.today().isoformat()
 
         if not clips_base.exists():
@@ -412,8 +476,13 @@ class CuttingScreen(Screen):
 
     @work(thread=True)
     def _run_segment_cutting(self) -> None:
+        from pipeline.audio_compressor import prepare_original_audio_with_offset
+        from pipeline.audio_cutter import (
+            cut_audio_segment,
+            build_output_audio_file_path,
+        )
+        from pipeline.language_detect import language_name
         from pipeline.subtitle_parser import (
-            find_end_of_preceding_subtitle,
             load_subtitle_file,
             slice_subtitles_within_window,
             save_subtitles_to_file,
@@ -423,6 +492,7 @@ class CuttingScreen(Screen):
             build_output_video_file_path,
             build_output_subtitle_file_path,
         )
+        from pipeline.clip_description import write_clip_description_file
 
         log = self._log_widget
         segments = self._pipeline_state.selected_segments
@@ -439,28 +509,26 @@ class CuttingScreen(Screen):
             self.app.call_from_thread(log.write_error, f"Could not load subtitle file: {error}")
             return
 
+        offset_audio_by_language = self._prepare_offset_audio_for_cutting(
+            prepare_original_audio_with_offset,
+        )
+
         cut_video_paths: list[tuple[Path, VideoSegment]] = []
         successfully_cut_count = 0
+        total_segments = len(segments)
 
-        for segment in segments:
+        self._notify_encoding_step("Segment Cutting", total_segments)
+
+        for clip_number, segment in enumerate(segments, 1):
             try:
-                preceding_subtitle_end = find_end_of_preceding_subtitle(
-                    all_subtitles, segment.start_time,
-                )
-                if preceding_subtitle_end is not None and preceding_subtitle_end != segment.start_time:
-                    original_start_timestamp = segment.ffmpeg_start_timestamp
-                    segment.start_time = preceding_subtitle_end
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"Segment {segment.index}: snapped start "
-                        f"{original_start_timestamp} → {segment.ffmpeg_start_timestamp} "
-                        f"(aligned to preceding subtitle boundary)",
-                    )
-
                 self.app.call_from_thread(
                     log.write_info,
                     f"Cutting segment {segment.index}: "
                     f"{segment.ffmpeg_start_timestamp} → {segment.ffmpeg_end_timestamp}",
+                )
+
+                self._notify_encoding_start(
+                    f"Segment {segment.index}", clip_number,
                 )
 
                 video_path = self._pipeline_state.video_file_path
@@ -483,6 +551,27 @@ class CuttingScreen(Screen):
                     slice_function=slice_subtitles_within_window,
                 )
 
+                description_path = write_clip_description_file(segment, video_output_path)
+                self.app.call_from_thread(
+                    log.write_info,
+                    f"Description: {description_path.name}",
+                )
+
+                for language_code, offset_audio_path in offset_audio_by_language.items():
+                    audio_output_path = build_output_audio_file_path(
+                        self._clips_directory, segment, language_code, video_path,
+                    )
+                    cut_audio_segment(
+                        source_audio_path=offset_audio_path,
+                        segment=segment,
+                        output_file_path=audio_output_path,
+                    )
+                    self.app.call_from_thread(
+                        log.write_info,
+                        f"Audio clip: {audio_output_path.name}",
+                    )
+
+                self._notify_encoding_complete()
                 self.app.call_from_thread(
                     log.write_success,
                     f"Segment {segment.index} saved: {video_output_path.name}",
@@ -525,11 +614,12 @@ class CuttingScreen(Screen):
             log.write_info,
             f"Processing {len(cut_video_paths)} segments with face tracking...",
         )
+        self._notify_encoding_step("Portrait Cropping", len(cut_video_paths))
 
         portrait_success_count = 0
         portrait_paths: list[Path] = []
 
-        for landscape_path, segment in cut_video_paths:
+        for clip_number, (landscape_path, segment) in enumerate(cut_video_paths, 1):
             try:
                 if self._enable_debug_overlay:
                     debug_path = build_debug_output_path(landscape_path)
@@ -554,12 +644,9 @@ class CuttingScreen(Screen):
                     log.write_info,
                     f"Segment {segment.index}: cropping to portrait...",
                 )
-
-                def on_crop_progress(percent: float, seg_index=segment.index):
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"  Segment {seg_index}: {percent:.0f}% encoded",
-                    )
+                self._notify_encoding_start(
+                    f"Segment {segment.index}", clip_number,
+                )
 
                 crop_segment_to_portrait(
                     source_video_path=landscape_path,
@@ -568,8 +655,9 @@ class CuttingScreen(Screen):
                     duration_seconds=segment.duration_seconds,
                     model_directory=model_directory,
                     speed_multiplier=self._pipeline_state.portrait_speed_multiplier,
-                    on_progress=on_crop_progress,
+                    on_progress=self._notify_encoding_progress,
                 )
+                self._notify_encoding_complete()
 
                 speed_label = ""
                 if self._pipeline_state.portrait_speed_multiplier != 1.0:
@@ -624,11 +712,12 @@ class CuttingScreen(Screen):
             log.write_info,
             f"Processing {len(clip_segment_pairs)} existing clips with face tracking...",
         )
+        self._notify_encoding_step("Portrait Cropping", len(clip_segment_pairs))
 
         portrait_success_count = 0
         portrait_paths: list[Path] = []
 
-        for clip_path, segment in clip_segment_pairs:
+        for clip_number, (clip_path, segment) in enumerate(clip_segment_pairs, 1):
             if "[portrait]" in clip_path.name or "[debug]" in clip_path.name:
                 continue
 
@@ -665,12 +754,7 @@ class CuttingScreen(Screen):
                     log.write_info,
                     f"  Cropping: {clip_path.name}",
                 )
-
-                def on_crop_progress(percent: float, name=clip_path.stem):
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"    {name}: {percent:.0f}% encoded",
-                    )
+                self._notify_encoding_start(clip_path.stem, clip_number)
 
                 crop_segment_to_portrait(
                     source_video_path=clip_path,
@@ -679,8 +763,9 @@ class CuttingScreen(Screen):
                     duration_seconds=segment.duration_seconds,
                     model_directory=model_directory,
                     speed_multiplier=self._pipeline_state.portrait_speed_multiplier,
-                    on_progress=on_crop_progress,
+                    on_progress=self._notify_encoding_progress,
                 )
+                self._notify_encoding_complete()
 
                 speed_label = ""
                 if self._pipeline_state.portrait_speed_multiplier != 1.0:
@@ -778,8 +863,9 @@ class CuttingScreen(Screen):
             log.write_info,
             f"Adding overlay to {len(source_paths)} clips (color from landscape clip)...",
         )
+        self._notify_encoding_step("Bottom Overlay", len(source_paths))
 
-        for source_path in source_paths:
+        for clip_number, source_path in enumerate(source_paths, 1):
             try:
                 output_path = build_square_output_path(source_path)
 
@@ -807,19 +893,16 @@ class CuttingScreen(Screen):
                         output_file_path=landscape_clip_path,
                     )
 
-                def on_overlay_progress(percent: float, name=source_path.stem):
-                    self.app.call_from_thread(
-                        log.write_info,
-                        f"  {name}: {percent:.0f}% encoded",
-                    )
+                self._notify_encoding_start(source_path.stem, clip_number)
 
                 apply_bottom_overlay(
                     source_video_path=source_path,
                     output_file_path=output_path,
                     landscape_video_path=landscape_clip_path,
                     overlay_height=self._pipeline_state.portrait_overlay_height,
-                    on_progress=on_overlay_progress,
+                    on_progress=self._notify_encoding_progress,
                 )
+                self._notify_encoding_complete()
 
                 self.app.call_from_thread(
                     log.write_success,

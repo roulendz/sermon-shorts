@@ -200,6 +200,8 @@ def transcribe_tracks_fresh(
     from pipeline.language_detect import language_name
     from pipeline.whisperx_response_storage import (
         build_next_version_directory_path,
+        build_version_directory_path,
+        find_latest_version_number,
         save_whisperx_response,
     )
 
@@ -210,25 +212,43 @@ def transcribe_tracks_fresh(
 
     client = WhisperXClient(api_base_url=whisperx_api_url, api_key=whisperx_api_key)
     version_directory = build_next_version_directory_path(video_file_path)
+    # a crashed/timed-out run leaves a partial version behind; resume into it so
+    # already-transcribed tracks are not paid for twice
+    latest_version = find_latest_version_number(video_file_path)
+    if latest_version is not None:
+        latest_directory = build_version_directory_path(video_file_path, latest_version)
+        stored_stems = {p.stem for p in latest_directory.glob("*.json")}
+        wanted_stems = {p.stem for p in discovered_tracks.values()}
+        if stored_stems and not wanted_stems.issubset(stored_stems):
+            version_directory = latest_directory
+            logger.info(
+                "Resuming partial WhisperX %s/ (already stored: %s)",
+                latest_directory.name, ", ".join(sorted(stored_stems)),
+            )
     logger.info("Storing WhisperX results in: %s/", version_directory.name)
 
     responses_by_language: dict[str, dict] = {}
     primary_subtitle_path: Optional[Path] = None
 
     for language_code, audio_file_path in discovered_tracks.items():
-        logger.info("Transcribing %s (%s)", language_name(language_code), audio_file_path.name)
-        prepared_audio_path = prepare_audio_with_offset(audio_file_path, on_progress=log_progress)
-        raw_response = client.transcribe_audio_file_raw(
-            audio_file_path=prepared_audio_path,
-            language_code=language_code,
-            on_progress=log_progress,
-        )
-        save_whisperx_response(
-            video_file_path=video_file_path,
-            audio_file_stem=audio_file_path.stem,
-            response_data=raw_response,
-            version_directory=version_directory,
-        )
+        stored_response_path = version_directory / f"{audio_file_path.stem}.json"
+        if stored_response_path.exists():
+            logger.info("Reusing stored WhisperX result: %s", stored_response_path.name)
+            raw_response = json.loads(stored_response_path.read_text(encoding="utf-8"))
+        else:
+            logger.info("Transcribing %s (%s)", language_name(language_code), audio_file_path.name)
+            prepared_audio_path = prepare_audio_with_offset(audio_file_path, on_progress=log_progress)
+            raw_response = client.transcribe_audio_file_raw(
+                audio_file_path=prepared_audio_path,
+                language_code=language_code,
+                on_progress=log_progress,
+            )
+            save_whisperx_response(
+                video_file_path=video_file_path,
+                audio_file_stem=audio_file_path.stem,
+                response_data=raw_response,
+                version_directory=version_directory,
+            )
         responses_by_language[language_code] = raw_response
         compatibility_path = save_single_language_srt(
             video_file_path, version_directory, audio_file_path.stem, raw_response,
@@ -436,20 +456,6 @@ def prepare_offset_audio_for_cutting(discovered_tracks: dict[str, Path]) -> dict
     return offset_audio_by_language
 
 
-def snap_segment_start_to_subtitle_boundary(segment: VideoSegment, all_subtitles) -> None:
-    """Move the cut start back to the end of the preceding subtitle (matches cutting_screen)."""
-    from pipeline.subtitle_parser import find_end_of_preceding_subtitle
-
-    preceding_end = find_end_of_preceding_subtitle(all_subtitles, segment.start_time)
-    if preceding_end is not None and preceding_end != segment.start_time:
-        original_timestamp = segment.ffmpeg_start_timestamp
-        segment.start_time = preceding_end
-        logger.info(
-            "Segment %d: snapped start %s -> %s (subtitle boundary)",
-            segment.index, original_timestamp, segment.ffmpeg_start_timestamp,
-        )
-
-
 def cut_one_segment(
     video_file_path: Path,
     segment: VideoSegment,
@@ -469,8 +475,6 @@ def cut_one_segment(
         build_output_video_file_path,
         cut_segment_from_video,
     )
-
-    snap_segment_start_to_subtitle_boundary(segment, all_subtitles)
 
     video_output_path = build_output_video_file_path(clips_directory, segment, video_file_path)
     logger.info(

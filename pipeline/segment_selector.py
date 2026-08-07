@@ -19,6 +19,7 @@ from typing import Sequence
 import srt
 
 from models.video_segment import VideoSegment
+from pipeline.turn_boundary_snapper import snap_segments_to_translation_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +35,30 @@ and highly shareable. You are precise and your output is always valid JSON.
 Read the ENTIRE SRT transcript below and identify the {minimum_clips} to \
 {maximum_clips} most viral-worthy segments.
 
+TRANSCRIPT STRUCTURE — CONSECUTIVE TRANSLATION:
+The sermon alternates between two speakers: the pastor speaks one or two \
+sentences in Russian ([RU] lines, the ORIGINAL), then the translator repeats \
+them in Latvian ([LV] lines, the TRANSLATION). This RU -> LV alternation \
+repeats for the whole sermon. A complete thought is therefore an [RU] passage \
+PLUS its [LV] translation — one is incomplete without the other.
+
 STRICT RULES:
-1. Each clip must be between 50 and 90 seconds long
+1. Each clip should be 50-90 seconds long; up to 105 seconds is acceptable \
+when needed to finish the final [LV] translation
 2. Return timestamps in ABSOLUTE SECONDS as a float (e.g. 95.350), \
 derived from the SRT timestamps in the file
-3. Start 0.5-1.0 seconds before a strong hook word
-4. End 0.5-1.0 seconds after a strong payoff word for natural pacing
-5. Each clip must be a complete, self-contained thought — never cut mid-sentence
-6. Segments must NOT overlap
-7. Do not select generic intros, outros, or announcements
-8. The transcript is bilingual — [RU] lines are Russian (pastor), [LV] lines \
-are Latvian (translator). Both languages are present in the video.
+3. Each clip MUST start at the beginning of an [RU] passage (the original) — \
+never at its [LV] translation of something the viewer has not heard
+4. Each clip MUST end at the end of the [LV] line that translates the final \
+[RU] sentence — never end on an untranslated [RU] line
+5. Each clip must be a complete, self-contained thought — never cut \
+mid-sentence. Individual SRT cues may split a sentence across several cues, \
+so choose boundaries at language-switch points where a thought completes
+6. When unsure about an end timestamp, choose the LATER cue end — the \
+pipeline snaps boundaries outward to complete RU->LV pairs, so a generous \
+end is safe but a tight one chops the translation
+7. Segments must NOT overlap
+8. Do not select generic intros, outros, or announcements
 
 GRAMMAR CORRECTION — for each selected clip:
 - Review both [RU] and [LV] text within the clip's time range
@@ -86,10 +100,15 @@ Respond with ONLY valid JSON — no markdown fences, no explanation, nothing els
       }},
       "reason_for_selection": "<one sentence expert analysis>",
       "corrected_text_ru": "<grammar-corrected Russian text for this clip>",
-      "corrected_text_lv": "<grammar-corrected Latvian text for this clip>"
+      "corrected_text_lv": "<grammar-corrected Latvian text for this clip>",
+      "social_description_lv": "<Latvian social-media description for THIS clip. Format exactly:\\nLINE 1: a single thought-provoking QUESTION that the FULL sermon answers but the short only raises — derived from this clip's topic (e.g. 'Ko Dievs domā par ļaunu cilvēku nodomiem?').\\nTHEN: 1-4 short supporting lines drawn ONLY from the sermon transcript that hint at the answer — if the clip references a Bible passage, quote it in the standard Latvian Bible translation with reference (e.g. 'Psalms 33:8-12 (Bībele jaunā tulkojumā) ...').\\nLAST LINE: #shorts\\nLatvian only. Do NOT include the fixed disclaimer line — it is added separately. Use natural, humanized phrasing.>"
     }}
   ]
 }}
+
+DESCRIPTION GOAL — for social_description_lv: the short asks a question, the full \
+sermon answers it. Make viewers want to watch the whole sermon to get the answer. \
+Pull the question and supporting lines strictly from what this sermon actually says.
 
 SRT TRANSCRIPT:
 {srt_content}
@@ -157,8 +176,11 @@ def parse_segments_from_manus_response(
                 overall_viral_score=scoring.get("overall_viral_score", 0.0),
                 suggested_title=raw_clip.get("suggested_title", f"Segment {raw_clip['index']}"),
                 viral_hook_text_overlay=raw_clip.get("viral_hook_text_overlay", ""),
+                social_description=raw_clip.get("social_description_lv", ""),
             )
         )
+
+    snap_segments_to_translation_pairs(video_segments, all_subtitles)
 
     logger.info(f"Parsed {len(video_segments)} segments from Manus response")
     return video_segments
