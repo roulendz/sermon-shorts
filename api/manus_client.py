@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 MANUS_API_BASE_URL = "https://api.manus.ai/v1"
 POLLING_INTERVAL_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 60
-MAX_POLLING_WAIT_SECONDS = 900  # 15 minutes
+MAX_POLLING_WAIT_SECONDS = 2700  # 45 minutes — Manus segment selection on a full sermon regularly exceeds 15
 
 
 class ManusTaskError(Exception):
@@ -33,6 +33,26 @@ class ManusClient:
             "Content-Type": "application/json",
         }
         self.last_task_id: Optional[str] = None
+        self._client: Optional[httpx.Client] = None
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                headers=self.request_headers,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> "ManusClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def submit_prompt_and_wait_for_response(
         self,
@@ -72,10 +92,9 @@ class ManusClient:
         _log(f"Fetching task: {task_id}")
 
         try:
-            status_response = httpx.get(
+            client = self._get_client()
+            status_response = client.get(
                 url=f"{MANUS_API_BASE_URL}/tasks/{task_id}",
-                headers=self.request_headers,
-                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             status_response.raise_for_status()
             status_data = status_response.json()
@@ -107,11 +126,10 @@ class ManusClient:
             params: dict = {}
             if project_id:
                 params["projectId"] = project_id
-            response = httpx.get(
+            client = self._get_client()
+            response = client.get(
                 url=f"{MANUS_API_BASE_URL}/tasks",
-                headers=self.request_headers,
                 params=params,
-                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data = response.json()
@@ -144,11 +162,10 @@ class ManusClient:
         if project_id:
             request_body["projectId"] = project_id
 
-        response = httpx.post(
+        client = self._get_client()
+        response = client.post(
             url=f"{MANUS_API_BASE_URL}/tasks",
-            headers=self.request_headers,
             json=request_body,
-            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         response_data = response.json()
@@ -177,11 +194,10 @@ class ManusClient:
 
         _log(f"Renaming task to: {title}")
         try:
-            response = httpx.put(
+            client = self._get_client()
+            response = client.put(
                 url=f"{MANUS_API_BASE_URL}/tasks/{task_id}",
-                headers=self.request_headers,
                 json={"title": title},
-                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
@@ -208,10 +224,9 @@ class ManusClient:
             remaining = MAX_POLLING_WAIT_SECONDS - elapsed_seconds
 
             try:
-                status_response = httpx.get(
+                client = self._get_client()
+                status_response = client.get(
                     url=f"{MANUS_API_BASE_URL}/tasks/{task_id}",
-                    headers=self.request_headers,
-                    timeout=REQUEST_TIMEOUT_SECONDS,
                 )
                 status_response.raise_for_status()
                 status_data = status_response.json()
@@ -316,10 +331,9 @@ class ManusClient:
         """Download content from a file URL attached to a Manus task response."""
         try:
             logger.info(f"Downloading file attachment: {file_url}")
-            response = httpx.get(
+            client = self._get_client()
+            response = client.get(
                 url=file_url,
-                headers=self.request_headers,
-                timeout=REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=True,
             )
             response.raise_for_status()
@@ -327,13 +341,13 @@ class ManusClient:
         except httpx.HTTPError:
             pass
         try:
-            response = httpx.get(
-                url=file_url,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-            return response.text
+            with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS) as bare_client:
+                response = bare_client.get(
+                    url=file_url,
+                    follow_redirects=True,
+                )
+                response.raise_for_status()
+                return response.text
         except httpx.HTTPError as error:
             logger.warning(f"Failed to download file attachment {file_url}: {error}")
             return ""

@@ -109,24 +109,20 @@ def run_ffmpeg_command(ffmpeg_arguments: list[str]) -> None:
         )
 
 
-def _sanitize_filename(name: str) -> str:
-    """Remove characters that are invalid in Windows/Mac filenames."""
+def sanitize_filename(name: str) -> str:
     invalid_chars = '<>:"/\\|?*'
     for ch in invalid_chars:
         name = name.replace(ch, "")
-    # Collapse multiple spaces
     return " ".join(name.split()).strip()
 
 
-def _extract_date_prefix(video_filename: str) -> str:
-    """Extract date prefix like '2026-01-04' from video filename."""
+def extract_date_prefix(video_filename: str) -> str:
     import re
     match = re.match(r"(\d{4}-\d{2}-\d{2})", video_filename)
     return match.group(1) if match else ""
 
 
-def _format_duration_label(duration_seconds: float) -> str:
-    """Format duration as human-readable label: '1m30s', '45s', '2m05s'."""
+def format_duration_label(duration_seconds: float) -> str:
     minutes = int(duration_seconds // 60)
     seconds = int(duration_seconds % 60)
     if minutes > 0:
@@ -134,23 +130,28 @@ def _format_duration_label(duration_seconds: float) -> str:
     return f"{seconds}s"
 
 
+def build_clip_base_filename(
+    segment: VideoSegment,
+    video_file_path: Path | None = None,
+) -> str:
+    date_prefix = ""
+    if video_file_path:
+        date_prefix = extract_date_prefix(video_file_path.stem)
+
+    title = sanitize_filename(segment.suggested_title or f"Segment {segment.index}")
+    duration_label = format_duration_label(segment.duration_seconds)
+
+    if date_prefix:
+        return f"{date_prefix} {title} [{duration_label}]"
+    return f"{title} [{duration_label}]"
+
+
 def build_output_video_file_path(
     output_directory: Path,
     segment: VideoSegment,
     video_file_path: Path | None = None,
 ) -> Path:
-    date_prefix = ""
-    if video_file_path:
-        date_prefix = _extract_date_prefix(video_file_path.stem)
-
-    title = _sanitize_filename(segment.suggested_title or f"Segment {segment.index}")
-    duration_label = _format_duration_label(segment.duration_seconds)
-    if date_prefix:
-        filename = f"{date_prefix} {title} [{duration_label}].mp4"
-    else:
-        filename = f"{title} [{duration_label}].mp4"
-
-    return output_directory / filename
+    return output_directory / f"{build_clip_base_filename(segment, video_file_path)}.mp4"
 
 
 def build_output_subtitle_file_path(
@@ -158,15 +159,4 @@ def build_output_subtitle_file_path(
     segment: VideoSegment,
     video_file_path: Path | None = None,
 ) -> Path:
-    date_prefix = ""
-    if video_file_path:
-        date_prefix = _extract_date_prefix(video_file_path.stem)
-
-    title = _sanitize_filename(segment.suggested_title or f"Segment {segment.index}")
-    duration_label = _format_duration_label(segment.duration_seconds)
-    if date_prefix:
-        filename = f"{date_prefix} {title} [{duration_label}].srt"
-    else:
-        filename = f"{title} [{duration_label}].srt"
-
-    return output_directory / filename
+    return output_directory / f"{build_clip_base_filename(segment, video_file_path)}.srt"

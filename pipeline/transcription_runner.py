@@ -18,6 +18,7 @@ from typing import Callable, Optional, Union
 
 from api.whisperx_client import WhisperXClient
 from api.transkriptor_client import TranskriptorClient
+from pipeline.project_paths import transcriptions_directory
 from pipeline.subtitle_parser import (
     parse_subtitle_text,
     shift_subtitle_timestamps,
@@ -130,13 +131,12 @@ def build_transcription_output_path(
     service_code: str,
 ) -> Path:
     """
-    Build output path: {video_root}/transcriptions/{audio_name}_{service}_{timestamp}.srt
+    Build path: {event}/Audio TRANSCRIPT/transcriptions/{audio_name}_{service}_{timestamp}.srt
     """
-    video_directory = video_file_path.parent
     audio_name = audio_file_path.stem
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{audio_name}_{service_code}_{timestamp}.srt"
-    return video_directory / "transcriptions" / filename
+    return transcriptions_directory(video_file_path) / filename
 
 
 def _save_subtitles_with_metadata(

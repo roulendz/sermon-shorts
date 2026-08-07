@@ -108,10 +108,10 @@ def test_build_ffmpeg_cut_arguments_ends_with_output_path():
     assert args[-1] == str(output_path)
 
 
-def test_build_output_video_file_path_uses_zero_padded_index():
+def test_build_output_video_file_path_uses_title_and_duration():
     segment = make_segment_at(timedelta(minutes=5), timedelta(minutes=5, seconds=25), index=3)
     result = build_output_video_file_path(Path("output"), segment)
-    assert result == Path("output/segment_03.mp4")
+    assert result == Path("output/Segment 3 [25s].mp4")
 
 
 def test_build_output_video_file_path_uses_mp4_extension():

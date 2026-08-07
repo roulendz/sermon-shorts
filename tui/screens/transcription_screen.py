@@ -22,6 +22,7 @@ from textual.widgets import Button, Footer, Header, Label, Rule
 from textual import work
 
 from models.pipeline_state import PipelineState
+from pipeline.project_paths import transcriptions_directory
 from tui.widgets.pipeline_log import PipelineLog
 
 
@@ -169,13 +170,16 @@ class TranscriptionScreen(Screen):
 
         log = self._log_widget
 
-        whisperx_api_url = os.getenv("WHISPERX_API_URL", "")
-        whisperx_api_key = os.getenv("WHISPERX_API_KEY", "")
+        whisperx_api_url = os.getenv("WHISPERX_API_URL", "") or "https://wsp.kingdom.lv"
+        # WhisperX (wsp.kingdom.lv) now requires a Bearer token. The token lives in
+        # the WSP_API_KEY env var (same one the /transcribe-wsp skill uses); fall back
+        # to the legacy WHISPERX_API_KEY name for back-compat.
+        whisperx_api_key = os.getenv("WSP_API_KEY", "") or os.getenv("WHISPERX_API_KEY", "")
 
         if not whisperx_api_url or not whisperx_api_key:
             self.app.call_from_thread(
                 log.write_error,
-                "WHISPERX_API_URL or WHISPERX_API_KEY not set in .env",
+                "WSP_API_KEY (or WHISPERX_API_KEY) not set in environment / .env",
             )
             return
 
@@ -257,11 +261,11 @@ class TranscriptionScreen(Screen):
                 )
 
                 # 5. Also save to transcriptions/ for downstream pipeline compatibility
-                transcriptions_directory = (
-                    self._pipeline_state.video_file_path.parent / "transcriptions"
+                transcriptions_output_directory = transcriptions_directory(
+                    self._pipeline_state.video_file_path
                 )
                 compatibility_srt_path = (
-                    transcriptions_directory / f"{audio_file_path.stem}_wordlevel.srt"
+                    transcriptions_output_directory / f"{audio_file_path.stem}_wordlevel.srt"
                 )
                 save_word_level_srt(subtitles, compatibility_srt_path)
 
@@ -309,11 +313,11 @@ class TranscriptionScreen(Screen):
                 merged_srt_path = version_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 save_word_level_srt(merged_subtitles, merged_srt_path)
 
-                transcriptions_directory = (
-                    self._pipeline_state.video_file_path.parent / "transcriptions"
+                transcriptions_output_directory = transcriptions_directory(
+                    self._pipeline_state.video_file_path
                 )
                 merged_compatibility_path = (
-                    transcriptions_directory / f"{video_stem}_bilingual_wordlevel.srt"
+                    transcriptions_output_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 )
                 save_word_level_srt(merged_subtitles, merged_compatibility_path)
 
@@ -409,11 +413,11 @@ class TranscriptionScreen(Screen):
                     responses_by_language["ru"] = response_data
 
                 # Copy to transcriptions/ for downstream compatibility
-                transcriptions_directory = (
-                    self._pipeline_state.video_file_path.parent / "transcriptions"
+                transcriptions_output_directory = transcriptions_directory(
+                    self._pipeline_state.video_file_path
                 )
                 compatibility_srt_path = (
-                    transcriptions_directory / f"{audio_stem}_wordlevel.srt"
+                    transcriptions_output_directory / f"{audio_stem}_wordlevel.srt"
                 )
                 save_word_level_srt(subtitles, compatibility_srt_path)
 
@@ -461,11 +465,11 @@ class TranscriptionScreen(Screen):
                 merged_srt_path = version_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 save_word_level_srt(merged_subtitles, merged_srt_path)
 
-                transcriptions_directory = (
-                    self._pipeline_state.video_file_path.parent / "transcriptions"
+                transcriptions_output_directory = transcriptions_directory(
+                    self._pipeline_state.video_file_path
                 )
                 merged_compatibility_path = (
-                    transcriptions_directory / f"{video_stem}_bilingual_wordlevel.srt"
+                    transcriptions_output_directory / f"{video_stem}_bilingual_wordlevel.srt"
                 )
                 save_word_level_srt(merged_subtitles, merged_compatibility_path)
 
@@ -508,14 +512,14 @@ class TranscriptionScreen(Screen):
         """Find most recent Transkriptor SRT in transcriptions/ folder."""
         from pipeline.transcription_runner import SERVICE_TRANSKRIPTOR
 
-        transcriptions_directory = (
-            self._pipeline_state.video_file_path.parent / "transcriptions"
+        transcriptions_output_directory = transcriptions_directory(
+            self._pipeline_state.video_file_path
         )
-        if not transcriptions_directory.exists():
+        if not transcriptions_output_directory.exists():
             return None
 
         transkriptor_files = sorted(
-            transcriptions_directory.glob(f"*_{SERVICE_TRANSKRIPTOR}_*.srt"),
+            transcriptions_output_directory.glob(f"*_{SERVICE_TRANSKRIPTOR}_*.srt"),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -561,16 +565,20 @@ class TranscriptionScreen(Screen):
     @work(thread=True)
     def _run_transkriptor_transcription(self) -> None:
         from api.transkriptor_client import TranskriptorClient
-        from pipeline.language_detect import (
-            detect_language_from_filename,
-            language_name,
-            to_transkriptor_locale,
+        from pipeline.audio_compressor import (
+            compress_audio_for_transkriptor,
+            prepare_audio_with_offset,
+        )
+        from pipeline.language_detect import language_name, to_transkriptor_locale
+        from pipeline.transcription_runner import (
+            transcribe_with_transkriptor_and_save_aligned_subtitles,
+            build_transcription_output_path,
+            SERVICE_TRANSKRIPTOR,
         )
 
         log = self._log_widget
 
         transkriptor_api_key = os.getenv("TRANSKRIPTOR_API_KEY", "")
-
         if not transkriptor_api_key:
             self.app.call_from_thread(
                 log.write_error,
@@ -583,60 +591,75 @@ class TranscriptionScreen(Screen):
             self.app.call_from_thread(log.write_error, "No audio tracks available")
             return
 
-        audio_file_path = discovered_tracks.get("lv") or next(iter(discovered_tracks.values()))
-        language_code = detect_language_from_filename(audio_file_path)
-        transkriptor_locale = to_transkriptor_locale(language_code)
-
-        self.app.call_from_thread(log.write_step_header, "Transkriptor Transcription")
         self.app.call_from_thread(
-            log.write_info,
-            f"Audio file: {audio_file_path.name}",
+            log.write_step_header,
+            "Transkriptor Transcription (all tracks)",
         )
         self.app.call_from_thread(
             log.write_info,
-            f"Language: {language_name(language_code)} ({transkriptor_locale})",
+            f"Processing {len(discovered_tracks)} audio track(s): "
+            + ", ".join(
+                f"{language_name(code)} ({path.name})"
+                for code, path in discovered_tracks.items()
+            ),
         )
 
         def on_progress(message: str) -> None:
             self.app.call_from_thread(log.write_info, message)
 
         try:
-            from pipeline.audio_compressor import compress_audio_for_transkriptor
-            from pipeline.transcription_runner import (
-                transcribe_with_transkriptor_and_save_aligned_subtitles,
-                build_transcription_output_path,
-                SERVICE_TRANSKRIPTOR,
-            )
-
-            upload_path = compress_audio_for_transkriptor(
-                audio_file_path,
-                on_progress=on_progress,
-            )
-
-            video_file_stem = self._pipeline_state.video_file_path.stem
             client = TranskriptorClient(api_key=transkriptor_api_key)
-            output_path = build_transcription_output_path(
-                video_file_path=self._pipeline_state.video_file_path,
-                audio_file_path=audio_file_path,
-                service_code=SERVICE_TRANSKRIPTOR,
-            )
+            video_file_stem = self._pipeline_state.video_file_path.stem
+            primary_subtitle_file_path = None
 
-            subtitle_file_path = transcribe_with_transkriptor_and_save_aligned_subtitles(
-                audio_file_path=upload_path,
-                output_subtitle_file_path=output_path,
-                transkriptor_client=client,
-                audio_to_video_offset_seconds=0.0,
-                language_locale=transkriptor_locale,
-                display_file_name=video_file_stem,
-                on_progress=on_progress,
-            )
+            for language_code, audio_file_path in discovered_tracks.items():
+                transkriptor_locale = to_transkriptor_locale(language_code)
 
-            self._delete_intermediate_audio_file(upload_path, audio_file_path, on_progress)
+                self.app.call_from_thread(
+                    log.write_step_header,
+                    f"Transcribing {language_name(language_code)} ({audio_file_path.name})",
+                )
 
-            self._pipeline_state.subtitle_file_path = subtitle_file_path
+                offset_audio_path = prepare_audio_with_offset(
+                    audio_file_path,
+                    on_progress=on_progress,
+                )
+
+                upload_path = compress_audio_for_transkriptor(
+                    offset_audio_path,
+                    on_progress=on_progress,
+                )
+
+                output_path = build_transcription_output_path(
+                    video_file_path=self._pipeline_state.video_file_path,
+                    audio_file_path=audio_file_path,
+                    service_code=SERVICE_TRANSKRIPTOR,
+                )
+
+                subtitle_file_path = transcribe_with_transkriptor_and_save_aligned_subtitles(
+                    audio_file_path=upload_path,
+                    output_subtitle_file_path=output_path,
+                    transkriptor_client=client,
+                    audio_to_video_offset_seconds=0.0,
+                    language_locale=transkriptor_locale,
+                    display_file_name=video_file_stem,
+                    on_progress=on_progress,
+                )
+
+                self._delete_intermediate_audio_file(upload_path, offset_audio_path, on_progress)
+
+                if language_code == "lv" or primary_subtitle_file_path is None:
+                    primary_subtitle_file_path = subtitle_file_path
+
+                self.app.call_from_thread(
+                    log.write_success,
+                    f"{language_name(language_code)} track complete",
+                )
+
+            self._pipeline_state.subtitle_file_path = primary_subtitle_file_path
             self.app.call_from_thread(
                 log.write_success,
-                f"Subtitles saved: {subtitle_file_path}",
+                f"All tracks transcribed. Primary SRT: {primary_subtitle_file_path.name}",
             )
             self.app.call_from_thread(self._enable_proceed_button)
 

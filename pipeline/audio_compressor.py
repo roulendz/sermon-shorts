@@ -2,8 +2,8 @@
 pipeline/audio_compressor.py
 
 Audio format conversion for transcription services.
-- WhisperX: 16kHz mono 16-bit WAV (with optional offset prepend)
-- Transkriptor: 16kHz mono MP3 128kbps (small upload size)
+- prepare_audio_with_offset: 16kHz mono WAV with silence prepend (source of truth)
+- compress_audio_for_transkriptor: MP3 128kbps format conversion (no offset, input already offset)
 """
 
 from __future__ import annotations
@@ -21,6 +21,25 @@ DEFAULT_AUDIO_OFFSET_SECONDS = 9.13
 
 TRANSKRIPTOR_BITRATE = "128k"
 TRANSKRIPTOR_SAMPLE_RATE = "16000"
+
+WHISPERX_CODEC_ARGUMENTS = ["-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"]
+WHISPERX_FORMAT_LABEL = "16kHz/16-bit/mono WAV"
+
+ORIGINAL_QUALITY_CODEC_ARGUMENTS = ["-acodec", "pcm_s16le"]
+ORIGINAL_QUALITY_FORMAT_LABEL = "original-quality WAV"
+
+TRANSKRIPTOR_CODEC_ARGUMENTS = [
+    "-ac", "1",
+    "-ar", TRANSKRIPTOR_SAMPLE_RATE,
+    "-ab", TRANSKRIPTOR_BITRATE,
+    "-acodec", "libmp3lame",
+]
+TRANSKRIPTOR_FORMAT_LABEL = f"MP3 mono {TRANSKRIPTOR_BITRATE} {TRANSKRIPTOR_SAMPLE_RATE}Hz"
+
+
+def _build_adelay_filter_value(offset_seconds: float) -> str:
+    delay_milliseconds = int(offset_seconds * 1000)
+    return f"adelay={delay_milliseconds}|{delay_milliseconds}"
 
 
 def _run_ffmpeg_conversion(
@@ -45,54 +64,97 @@ def _format_file_size_megabytes(file_path: Path) -> float:
     return file_path.stat().st_size / (1024 * 1024)
 
 
-def prepare_audio_with_offset(
+def _convert_audio(
     audio_file_path: Path,
-    offset_seconds: float = DEFAULT_AUDIO_OFFSET_SECONDS,
+    output_suffix: str,
+    codec_arguments: list[str],
+    format_label: str,
+    offset_seconds: float = 0.0,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Path:
-    """
-    Convert audio to 16kHz/mono/16-bit WAV with silence prepended for offset.
-    Caches as {stem}.offset.16k.wav.
-    """
     def _log(message: str) -> None:
         logger.info(message)
         if on_progress:
             on_progress(message)
 
-    converted_path = audio_file_path.parent / f"{audio_file_path.stem}.offset.16k.wav"
+    output_path = audio_file_path.parent / f"{audio_file_path.stem}{output_suffix}"
 
-    if converted_path.exists():
-        _log(f"Using cached offset audio ({_format_file_size_megabytes(converted_path):.0f} MB)")
-        return converted_path
+    if output_path.exists():
+        _log(f"Using cached audio ({_format_file_size_megabytes(output_path):.0f} MB)")
+        return output_path
 
     source_size_megabytes = _format_file_size_megabytes(audio_file_path)
-    delay_milliseconds = int(offset_seconds * 1000)
+    has_offset = offset_seconds > 0.0
+    offset_label = f" + {offset_seconds}s offset" if has_offset else ""
 
     _log(
         f"Converting {audio_file_path.name} ({source_size_megabytes:.0f} MB) "
-        f"to 16kHz/16-bit/mono WAV with {offset_seconds}s silence prepended..."
+        f"to {format_label}{offset_label}..."
     )
+
+    adelay_filter_arguments = ["-af", _build_adelay_filter_value(offset_seconds)] if has_offset else []
 
     ffmpeg_arguments = [
         "ffmpeg", "-y",
         "-i", str(audio_file_path),
         "-vn",
-        "-af", f"adelay={delay_milliseconds}|{delay_milliseconds}",
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        str(converted_path),
+        *adelay_filter_arguments,
+        *codec_arguments,
+        str(output_path),
     ]
 
-    _run_ffmpeg_conversion(ffmpeg_arguments, converted_path)
+    _run_ffmpeg_conversion(ffmpeg_arguments, output_path)
 
-    converted_size_megabytes = _format_file_size_megabytes(converted_path)
+    output_size_megabytes = _format_file_size_megabytes(output_path)
     _log(
-        f"Converted: {source_size_megabytes:.0f} MB -> {converted_size_megabytes:.0f} MB "
-        f"(16kHz/16-bit/mono + {offset_seconds}s offset)"
+        f"Converted: {source_size_megabytes:.0f} MB -> {output_size_megabytes:.0f} MB "
+        f"({format_label}{offset_label})"
     )
 
-    return converted_path
+    return output_path
+
+
+def prepare_audio_with_offset(
+    audio_file_path: Path,
+    offset_seconds: float = DEFAULT_AUDIO_OFFSET_SECONDS,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Path:
+    return _convert_audio(
+        audio_file_path,
+        output_suffix=".offset.16k.wav",
+        codec_arguments=WHISPERX_CODEC_ARGUMENTS,
+        format_label=WHISPERX_FORMAT_LABEL,
+        offset_seconds=offset_seconds,
+        on_progress=on_progress,
+    )
+
+
+def prepare_original_audio_with_offset(
+    audio_file_path: Path,
+    offset_seconds: float = DEFAULT_AUDIO_OFFSET_SECONDS,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Path:
+    return _convert_audio(
+        audio_file_path,
+        output_suffix=".offset.wav",
+        codec_arguments=ORIGINAL_QUALITY_CODEC_ARGUMENTS,
+        format_label=ORIGINAL_QUALITY_FORMAT_LABEL,
+        offset_seconds=offset_seconds,
+        on_progress=on_progress,
+    )
+
+
+def compress_audio_for_transkriptor(
+    audio_file_path: Path,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Path:
+    return _convert_audio(
+        audio_file_path,
+        output_suffix=".transkriptor.mp3",
+        codec_arguments=TRANSKRIPTOR_CODEC_ARGUMENTS,
+        format_label=TRANSKRIPTOR_FORMAT_LABEL,
+        on_progress=on_progress,
+    )
 
 
 def compress_audio_if_needed(
@@ -139,51 +201,3 @@ def compress_audio_if_needed(
     _log(f"Converted: {source_size_megabytes:.0f} MB -> {converted_size_megabytes:.0f} MB (16kHz/16-bit/mono)")
 
     return converted_path
-
-
-def compress_audio_for_transkriptor(
-    audio_file_path: Path,
-    on_progress: Optional[Callable[[str], None]] = None,
-) -> Path:
-    """
-    Convert audio to MP3 mono 128kbps 16kHz for Transkriptor upload.
-    Minimizes upload size while preserving speech clarity.
-    Caches as {stem}.transkriptor.mp3.
-    """
-    def _log(message: str) -> None:
-        logger.info(message)
-        if on_progress:
-            on_progress(message)
-
-    compressed_path = audio_file_path.parent / f"{audio_file_path.stem}.transkriptor.mp3"
-
-    if compressed_path.exists():
-        _log(f"Using cached Transkriptor audio ({_format_file_size_megabytes(compressed_path):.0f} MB)")
-        return compressed_path
-
-    source_size_megabytes = _format_file_size_megabytes(audio_file_path)
-    _log(
-        f"Compressing {audio_file_path.name} ({source_size_megabytes:.0f} MB) "
-        f"to MP3 mono {TRANSKRIPTOR_BITRATE} {TRANSKRIPTOR_SAMPLE_RATE}Hz..."
-    )
-
-    ffmpeg_arguments = [
-        "ffmpeg", "-y",
-        "-i", str(audio_file_path),
-        "-vn",
-        "-ac", "1",
-        "-ar", TRANSKRIPTOR_SAMPLE_RATE,
-        "-ab", TRANSKRIPTOR_BITRATE,
-        "-acodec", "libmp3lame",
-        str(compressed_path),
-    ]
-
-    _run_ffmpeg_conversion(ffmpeg_arguments, compressed_path)
-
-    compressed_size_megabytes = _format_file_size_megabytes(compressed_path)
-    _log(
-        f"Compressed: {source_size_megabytes:.0f} MB -> {compressed_size_megabytes:.0f} MB "
-        f"(MP3 mono {TRANSKRIPTOR_BITRATE} {TRANSKRIPTOR_SAMPLE_RATE}Hz)"
-    )
-
-    return compressed_path

@@ -23,7 +23,7 @@ def test_find_latest_version_number_returns_none_when_no_whisperx_folder(tmp_pat
 def test_find_latest_version_number_returns_none_when_empty_folder(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    (tmp_path / "whisperx").mkdir()
+    (tmp_path / "Audio TRANSCRIPT" / "whisperx").mkdir(parents=True)
 
     assert find_latest_version_number(video_file) is None
 
@@ -31,7 +31,7 @@ def test_find_latest_version_number_returns_none_when_empty_folder(tmp_path):
 def test_find_latest_version_number_finds_single_version(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    (tmp_path / "whisperx" / "v1").mkdir(parents=True)
+    (tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v1").mkdir(parents=True)
 
     assert find_latest_version_number(video_file) == 1
 
@@ -39,7 +39,7 @@ def test_find_latest_version_number_finds_single_version(tmp_path):
 def test_find_latest_version_number_finds_highest_version(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    whisperx_directory = tmp_path / "whisperx"
+    whisperx_directory = tmp_path / "Audio TRANSCRIPT" / "whisperx"
     (whisperx_directory / "v1").mkdir(parents=True)
     (whisperx_directory / "v2").mkdir()
     (whisperx_directory / "v3").mkdir()
@@ -50,7 +50,7 @@ def test_find_latest_version_number_finds_highest_version(tmp_path):
 def test_find_latest_version_number_ignores_non_version_folders(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    whisperx_directory = tmp_path / "whisperx"
+    whisperx_directory = tmp_path / "Audio TRANSCRIPT" / "whisperx"
     (whisperx_directory / "v1").mkdir(parents=True)
     (whisperx_directory / "temp").mkdir()
     (whisperx_directory / "notes.txt").touch()
@@ -63,7 +63,7 @@ def test_build_version_directory_path(tmp_path):
 
     result = build_version_directory_path(video_file, 3)
 
-    assert result == tmp_path / "whisperx" / "v3"
+    assert result == tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v3"
 
 
 def test_build_next_version_directory_path_starts_at_v1(tmp_path):
@@ -72,23 +72,23 @@ def test_build_next_version_directory_path_starts_at_v1(tmp_path):
 
     result = build_next_version_directory_path(video_file)
 
-    assert result == tmp_path / "whisperx" / "v1"
+    assert result == tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v1"
 
 
 def test_build_next_version_directory_path_increments(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    (tmp_path / "whisperx" / "v2").mkdir(parents=True)
+    (tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v2").mkdir(parents=True)
 
     result = build_next_version_directory_path(video_file)
 
-    assert result == tmp_path / "whisperx" / "v3"
+    assert result == tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v3"
 
 
 def test_save_and_load_whisperx_response(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    version_directory = tmp_path / "whisperx" / "v1"
+    version_directory = tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v1"
 
     sample_response = {
         "segments": [
@@ -121,7 +121,7 @@ def test_save_and_load_whisperx_response(tmp_path):
 def test_list_stored_audio_stems_for_version(tmp_path):
     video_file = tmp_path / "sermon.mp4"
     video_file.touch()
-    version_directory = tmp_path / "whisperx" / "v1"
+    version_directory = tmp_path / "Audio TRANSCRIPT" / "whisperx" / "v1"
     version_directory.mkdir(parents=True)
     (version_directory / "sermon_A03.json").write_text("{}")
     (version_directory / "sermon_A04.json").write_text("{}")

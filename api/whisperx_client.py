@@ -22,7 +22,7 @@ CHUNK_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB chunks
 POLLING_INTERVAL_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 120
 UPLOAD_CHUNK_TIMEOUT_SECONDS = 300
-MAX_POLLING_WAIT_SECONDS = 3600
+MAX_POLLING_WAIT_SECONDS = 14400  # 4h: a 90-min sermon track can take >1h to diarize
 
 
 class WhisperXTranscriptionError(Exception):
@@ -75,7 +75,9 @@ class WhisperXClient:
 
         file_size = audio_file_path.stat().st_size
         file_size_mb = file_size / (1024 * 1024)
-        filename = audio_file_path.name
+        # salt the upload name: TUS dedupes identical filename+size and hands back the
+        # PREVIOUS upload's task (seen 2026-07-21: a rerun polled the old FAILED task)
+        filename = f"{audio_file_path.stem}.{int(time.time())}{audio_file_path.suffix}"
 
         _log(f"Uploading {filename} ({file_size_mb:.1f} MB) via chunked upload...")
 

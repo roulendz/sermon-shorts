@@ -31,6 +31,11 @@ class VideoSegment:
     # Short text overlay for the opening of the clip — for Phase 2 burn-in
     viral_hook_text_overlay: str = ""
 
+    # Dynamic social-media description body (Latvian): opens with a question that
+    # the full sermon answers, followed by supporting verse/commentary drawn from
+    # the transcript, ending with "#shorts". Written to a .md file beside the clip.
+    social_description: str = ""
+
     def __post_init__(self) -> None:
         if self.start_time < timedelta(0):
             raise ValueError(f"start_time must be non-negative, got {self.start_time}")

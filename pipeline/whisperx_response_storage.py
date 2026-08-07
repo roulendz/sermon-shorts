@@ -14,9 +14,10 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from pipeline.project_paths import whisperx_storage_directory
+
 logger = logging.getLogger(__name__)
 
-WHISPERX_STORAGE_FOLDER_NAME = "whisperx"
 VERSION_DIRECTORY_PATTERN = re.compile(r"^v(\d+)$")
 
 
@@ -25,7 +26,7 @@ def find_latest_version_number(video_file_path: Path) -> Optional[int]:
     Scan {video_dir}/whisperx/ for versioned folders (v1, v2, ...).
     Returns the highest version number found, or None if none exist.
     """
-    whisperx_directory = video_file_path.parent / WHISPERX_STORAGE_FOLDER_NAME
+    whisperx_directory = whisperx_storage_directory(video_file_path)
 
     if not whisperx_directory.is_dir():
         return None
@@ -47,11 +48,7 @@ def build_version_directory_path(
     version_number: int,
 ) -> Path:
     """Return the path to a specific version directory."""
-    return (
-        video_file_path.parent
-        / WHISPERX_STORAGE_FOLDER_NAME
-        / f"v{version_number}"
-    )
+    return whisperx_storage_directory(video_file_path) / f"v{version_number}"
 
 
 def build_next_version_directory_path(video_file_path: Path) -> Path:

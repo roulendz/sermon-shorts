@@ -22,6 +22,7 @@ from textual import work
 
 from models.pipeline_state import PipelineState
 from models.video_segment import VideoSegment
+from pipeline.project_paths import data_directory
 from tui.widgets.pipeline_log import PipelineLog
 
 logger = logging.getLogger(__name__)
@@ -297,13 +298,16 @@ class SegmentReviewScreen(Screen):
                 )
 
             client = ManusClient(api_key=manus_api_key)
-            manus_response = client.submit_prompt_and_wait_for_response(
-                prompt,
-                on_progress=on_progress,
-                on_task_created=on_task_created,
-                project_id=manus_project_id or None,
-                task_title=video_filename,
-            )
+            try:
+                manus_response = client.submit_prompt_and_wait_for_response(
+                    prompt,
+                    on_progress=on_progress,
+                    on_task_created=on_task_created,
+                    project_id=manus_project_id or None,
+                    task_title=video_filename,
+                )
+            finally:
+                client.close()
 
             # Save Manus response to JSON for reuse
             self._save_manus_response(manus_response)
@@ -414,9 +418,9 @@ class SegmentReviewScreen(Screen):
         """Find all saved Manus response JSON files next to the video file."""
         if not self._pipeline_state.video_file_path:
             return []
-        video_directory = self._pipeline_state.video_file_path.parent
+        responses_directory = data_directory(self._pipeline_state.video_file_path)
         return sorted(
-            video_directory.glob("manus_response_*.json"),
+            responses_directory.glob("manus_response_*.json"),
             reverse=True,
         )
 
@@ -424,9 +428,11 @@ class SegmentReviewScreen(Screen):
         """Save Manus raw response to JSON file for reuse."""
         if not self._pipeline_state.video_file_path:
             return
-        video_directory = self._pipeline_state.video_file_path.parent
+        responses_directory = data_directory(
+            self._pipeline_state.video_file_path, create=True
+        )
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = video_directory / f"manus_response_{timestamp}.json"
+        output_path = responses_directory / f"manus_response_{timestamp}.json"
         output_path.write_text(response_text, encoding="utf-8", errors="replace")
         logger.info(f"Manus response saved: {output_path}")
 
@@ -509,7 +515,10 @@ class SegmentReviewScreen(Screen):
                 self.app.call_from_thread(log.write_info, msg)
 
             client = ManusClient(api_key=manus_api_key)
-            manus_response = client.fetch_task_response(task_id, on_progress)
+            try:
+                manus_response = client.fetch_task_response(task_id, on_progress)
+            finally:
+                client.close()
 
             self._save_manus_response(manus_response)
             self._register_task(task_id, status="completed")
@@ -541,7 +550,10 @@ class SegmentReviewScreen(Screen):
     def _get_task_registry_path(self) -> Path | None:
         if not self._pipeline_state.video_file_path:
             return None
-        return self._pipeline_state.video_file_path.parent / "manus_tasks.json"
+        return (
+            data_directory(self._pipeline_state.video_file_path, create=True)
+            / "manus_tasks.json"
+        )
 
     def _load_task_registry(self) -> list[dict]:
         registry_path = self._get_task_registry_path()
