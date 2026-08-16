@@ -17,6 +17,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 MANUS_API_BASE_URL = "https://api.manus.ai/v1"
+MANUS_API_V2_BASE_URL = "https://api.manus.ai/v2"
 POLLING_INTERVAL_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 60
 MAX_POLLING_WAIT_SECONDS = 2700  # 45 minutes — Manus segment selection on a full sermon regularly exceeds 15
@@ -61,14 +62,29 @@ class ManusClient:
         on_task_created: Optional[Callable[[str], None]] = None,
         project_id: Optional[str] = None,
         task_title: Optional[str] = None,
+        attachment_filename: Optional[str] = None,
+        attachment_text: Optional[str] = None,
     ) -> str:
         """
         Submit a prompt to Manus AI and block until the task is complete.
         Returns the raw text response from the agent.
         Calls on_task_created(task_id) immediately after submission,
         before polling begins — use this to persist the task_id for resume.
+        When attachment_text is given it is uploaded as a file and the task is
+        created via the v2 API (the v1 inline prompt is capped at ~5000
+        estimated tokens, far below a full sermon SRT).
         """
-        task_id = self._submit_task(prompt_text, on_progress, project_id)
+        if attachment_text is not None:
+            task_id = self._submit_task_with_attachment(
+                prompt_text,
+                attachment_filename or "transcript.srt",
+                attachment_text,
+                on_progress,
+                project_id,
+                task_title,
+            )
+        else:
+            task_id = self._submit_task(prompt_text, on_progress, project_id)
         self.last_task_id = task_id
         if on_task_created:
             on_task_created(task_id)
@@ -177,6 +193,81 @@ class ManusClient:
             )
 
         task_url = response_data.get("task_url", f"https://manus.im/tasks/{task_id}")
+        _log(f"Task submitted: {task_id}")
+        _log(f"Task URL: {task_url}")
+        return task_id
+
+    def _submit_task_with_attachment(
+        self,
+        prompt_text: str,
+        attachment_filename: str,
+        attachment_text: str,
+        on_progress: Optional[Callable[[str], None]] = None,
+        project_id: Optional[str] = None,
+        task_title: Optional[str] = None,
+    ) -> str:
+        """
+        v2 flow: file.upload -> presigned PUT -> task.create with the file
+        attached. Task ids are shared between API versions, so the existing
+        v1 GET /tasks/{id} polling keeps working on the returned id.
+        """
+        def _log(msg: str) -> None:
+            logger.info(msg)
+            if on_progress:
+                on_progress(msg)
+
+        client = self._get_client()
+        v2_headers = {"x-manus-api-key": self.request_headers["API_KEY"]}
+
+        _log(f"Uploading {attachment_filename} to Manus (v2 file.upload)...")
+        upload_response = client.post(
+            url=f"{MANUS_API_V2_BASE_URL}/file.upload",
+            json={"filename": attachment_filename},
+            headers=v2_headers,
+        )
+        upload_response.raise_for_status()
+        upload_data = upload_response.json()
+        if not upload_data.get("ok"):
+            raise ManusTaskError(f"file.upload failed: {upload_data}")
+        # presigned URL: no api-key header, raw bytes
+        put_response = httpx.put(
+            upload_data["upload_url"],
+            content=attachment_text.encode("utf-8"),
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        put_response.raise_for_status()
+        file_id = upload_data["file"]["id"]
+
+        _log("Submitting task to Manus AI (v2 task.create with attachment)...")
+        request_body: dict = {
+            "message": {
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "file", "file_id": file_id},
+                ]
+            }
+        }
+        if project_id:
+            request_body["project_id"] = project_id
+        if task_title:
+            request_body["title"] = task_title
+        create_response = client.post(
+            url=f"{MANUS_API_V2_BASE_URL}/task.create",
+            json=request_body,
+            headers=v2_headers,
+        )
+        create_response.raise_for_status()
+        create_data = create_response.json()
+        if not create_data.get("ok"):
+            raise ManusTaskError(f"task.create failed: {create_data}")
+
+        task_id = create_data.get("task_id")
+        if not task_id:
+            raise ManusTaskError(
+                f"Manus v2 response did not contain a task_id: {create_data}"
+            )
+        task_url = create_data.get("task_url", f"https://manus.im/app/{task_id}")
         _log(f"Task submitted: {task_id}")
         _log(f"Task URL: {task_url}")
         return task_id

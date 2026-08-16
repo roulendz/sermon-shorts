@@ -366,8 +366,13 @@ def request_new_manus_analysis(
     # Honour --min-clips/--max-clips without editing the module source.
     segment_selector.MINIMUM_CLIPS = minimum_clips
     segment_selector.MAXIMUM_CLIPS = maximum_clips
+    # The full SRT goes up as a FILE attachment: the v1 inline prompt is capped
+    # at ~5000 estimated tokens ("message content must be at most 5000 estimated
+    # tokens"), which a full sermon transcript always exceeds.
+    srt_content = build_srt_content_for_prompt(all_subtitles)
     prompt = segment_selector.build_segment_selection_prompt(
-        build_srt_content_for_prompt(all_subtitles)
+        "(the full SRT transcript is in the attached file transcript.srt — "
+        "read it in full before selecting segments)"
     )
 
     manus_project_id = os.getenv("MANUS_PROJECT_ID", "")
@@ -378,6 +383,8 @@ def request_new_manus_analysis(
             on_progress=log_progress,
             project_id=manus_project_id or None,
             task_title=video_file_path.stem,
+            attachment_filename="transcript.srt",
+            attachment_text=srt_content,
         )
     finally:
         client.close()
@@ -495,6 +502,21 @@ def cut_one_segment(
 
     description_path = write_clip_description_file(segment, video_output_path)
 
+    from pipeline.timeline_receipt import (
+        build_base_stage,
+        load_timeline_receipt,
+        save_timeline_receipt,
+    )
+    from pipeline.video_probe import probe_duration_seconds
+
+    receipt = load_timeline_receipt(clips_directory, video_output_path.stem)
+    receipt["base"] = build_base_stage(
+        requested_start_seconds=segment.start_seconds,
+        requested_end_seconds=segment.end_seconds,
+        mp4_duration_seconds=probe_duration_seconds(video_output_path),
+    )
+    save_timeline_receipt(clips_directory, receipt)
+
     for language_code, offset_audio_path in offset_audio_by_language.items():
         audio_output_path = build_output_audio_file_path(
             clips_directory, segment, language_code, video_file_path,
@@ -535,34 +557,57 @@ def render_one_portrait(
     from pipeline.silence_remover import (
         SilenceRemovalError,
         build_silence_removed_output_path,
+        plan_silence_removal,
         remove_silence_from_video,
     )
+    from pipeline.timeline_receipt import (
+        build_portrait_stage,
+        build_trim_stage,
+        load_timeline_receipt,
+        save_timeline_receipt,
+    )
+    from pipeline.video_probe import probe_duration_seconds
 
+    # Crop the FULL base mp4: the stream-copy cut starts at an earlier keyframe,
+    # so cropping only segment.duration_seconds would chop the clip's tail.
+    base_mp4_duration = probe_duration_seconds(landscape_video_path)
     portrait_output_path = build_portrait_output_path(landscape_video_path)
     logger.info("Segment %d: cropping to portrait...", segment.index)
     crop_segment_to_portrait(
         source_video_path=landscape_video_path,
         output_file_path=portrait_output_path,
         start_seconds=0.0,
-        duration_seconds=segment.duration_seconds,
+        duration_seconds=base_mp4_duration,
         model_directory=POSE_MODEL_DIRECTORY,
         speed_multiplier=speed_multiplier,
         on_progress=None,
     )
 
+    clips_directory = landscape_video_path.parent
+    receipt = load_timeline_receipt(clips_directory, landscape_video_path.stem)
+    receipt["portrait"] = build_portrait_stage(base_mp4_duration, speed_multiplier)
+
     overlay_input_path = portrait_output_path
     if remove_silence:
         trimmed_output_path = build_silence_removed_output_path(portrait_output_path)
         try:
+            kept_segments = plan_silence_removal(
+                portrait_output_path,
+                minimum_duration_seconds=minimum_silence_seconds,
+                on_progress=log_progress,
+            )
+            receipt["trim"] = build_trim_stage(kept_segments) if kept_segments else None
             overlay_input_path = remove_silence_from_video(
                 source_video_path=portrait_output_path,
                 output_file_path=trimmed_output_path,
                 minimum_duration_seconds=minimum_silence_seconds,
                 on_progress=log_progress,
+                non_silent_segments=kept_segments,
             )
         except SilenceRemovalError as error:
             logger.error("Segment %d silence removal failed: %s", segment.index, error)
             overlay_input_path = portrait_output_path
+    save_timeline_receipt(clips_directory, receipt)
 
     square_output_path = build_square_output_path(overlay_input_path)
     apply_bottom_overlay(
