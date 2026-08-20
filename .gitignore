@@ -16,3 +16,5 @@ manus_tasks.json
 manus_pending_task.json
 manus_response_*.json
 test_overlay_*.png
+# one-shot Manus API response captures (debug artifacts)
+manus_response.json

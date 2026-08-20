@@ -99,18 +99,15 @@ def build_non_silent_segments(
     return segments
 
 
-def remove_silence_from_video(
+def plan_silence_removal(
     source_video_path: Path,
-    output_file_path: Path,
     minimum_duration_seconds: float = 1.0,
     on_progress: Optional[Callable[[str], None]] = None,
-) -> Path:
+) -> Optional[list[tuple[float, float]]]:
     """
-    Detect silent periods and produce a new video with silences removed.
-    Returns output path. Raises SilenceRemovalError on failure.
+    Detect silences and return the kept (non-silent) segments, or None when
+    the video has no removable silence. Detection only — no encoding.
     """
-    logger.info("Silence removal: %s → %s", source_video_path.name, output_file_path.name)
-
     if on_progress:
         on_progress("Detecting silence...")
 
@@ -122,19 +119,41 @@ def remove_silence_from_video(
     if not silence_ranges:
         if on_progress:
             on_progress("No silence detected, skipping")
-        return source_video_path
+        return None
 
     total_silence = sum(end - start for start, end in silence_ranges)
     if on_progress:
         on_progress(f"Found {len(silence_ranges)} silent gaps ({total_silence:.1f}s total)")
 
     total_duration = probe_duration_seconds(source_video_path)
+    return build_non_silent_segments(total_duration, silence_ranges)
 
-    non_silent_segments = build_non_silent_segments(total_duration, silence_ranges)
+
+def remove_silence_from_video(
+    source_video_path: Path,
+    output_file_path: Path,
+    minimum_duration_seconds: float = 1.0,
+    on_progress: Optional[Callable[[str], None]] = None,
+    non_silent_segments: Optional[list[tuple[float, float]]] = None,
+) -> Path:
+    """
+    Detect silent periods and produce a new video with silences removed.
+    A precomputed plan from plan_silence_removal() can be passed to avoid
+    detecting twice. Returns output path (the source path when there is
+    nothing to trim). Raises SilenceRemovalError on failure.
+    """
+    logger.info("Silence removal: %s → %s", source_video_path.name, output_file_path.name)
+
+    if non_silent_segments is None:
+        non_silent_segments = plan_silence_removal(
+            source_video_path, minimum_duration_seconds, on_progress,
+        )
+    if non_silent_segments is None:
+        return source_video_path
 
     if on_progress:
         kept_duration = sum(end - start for start, end in non_silent_segments)
-        on_progress(f"Keeping {kept_duration:.1f}s of {total_duration:.1f}s")
+        on_progress(f"Keeping {kept_duration:.1f}s across {len(non_silent_segments)} segments")
 
     filter_parts: list[str] = []
     concat_inputs: list[str] = []
