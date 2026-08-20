@@ -64,3 +64,14 @@ Audio filename suffix determines language: `_A03` = Latvian, `_A04` = Russian, `
 ## Testing
 
 Tests use `pytest` + `respx` (HTTP mocking). Fixtures in `tests/conftest.py`. Tests never hit real APIs.
+
+## File Layout
+
+Module boundaries above are the layout: `api/`, `pipeline/`, `tui/screens/`,
+`models/`, `tests/`. Nothing loose in the repo root beyond `main.py` and the
+Python manifests.
+
+One-shot operations (a batch re-cut, a backfill, a data migration) go in
+`runs/YYYY-MM-DD-<slug>/` holding `NOTES.md`, `plan.json`, `apply.py`,
+`rollback.json`, `log.txt`. Never `-v2` / `-new` / `-final` filename suffixes —
+a second attempt is a new run directory. Full rules: `~/.claude/CLAUDE.md`.
